@@ -213,6 +213,181 @@ function TrainingPage() {
     // 🌟 Add Expand widget to the UI
     view.ui.add(measurementExpand, "top-right");
 
+    // -------------------------------START PRINT WIDGET -------------------------------------------------
+    const PrintDiv = document.getElementsByClassName("print-widget")[0] as HTMLDivElement;
+
+    const expandPrintButton = new Expand({
+      view: view,
+      content: PrintDiv,
+      expandTooltip: "Generate Print",
+      expandIcon: "print",
+    });
+    view.ui.add(expandPrintButton, "top-right");
+
+    const northArrowSelectDiv = PrintDiv.querySelector("#northArrowSelect");
+    let selectedNorthArrowIcon = "1";
+    if (northArrowSelectDiv) {
+      northArrowSelectDiv.addEventListener("click", (e) => {
+        const target = (e.target as HTMLElement).closest(".north-arrow-option");
+        if (target) {
+          // Remove .selected from all
+          northArrowSelectDiv.querySelectorAll(".north-arrow-option").forEach(el => el.classList.remove("selected"));
+          target.classList.add("selected");
+          selectedNorthArrowIcon = target.getAttribute("data-icon") || "1";
+        }
+      });
+    }
+
+    PrintDiv.querySelector("#PrintExport")?.addEventListener("click", async () => {
+      const fileName = (document.getElementById("PrintFileName") as HTMLInputElement).value || "Print On Demand";
+      const layout = (document.getElementById("PrintLayout") as HTMLSelectElement).value;
+      const orientation = (document.getElementById("PrintOrientation") as HTMLSelectElement).value;
+      const northArrow = (document.getElementById("PrintNorthArrow") as HTMLSelectElement).value;
+
+      let width: number, height: number;
+      if (layout === "a4") {
+        if (orientation === "landscape") {
+          width = 842;
+          height = 595;
+        } else {
+          width = 595;
+          height = 842;
+        }
+      } else if (layout === "a3") {
+        if (orientation === "landscape") {
+          width = 1191;
+          height = 842;
+        } else {
+          width = 842;
+          height = 1191;
+        }
+      } else {
+        // Default to A4 landscape if layout is unknown
+        width = 842;
+        height = 595;
+      }
+
+      const pdf = new jsPDF({
+        orientation: width > height ? "l" : "p",
+        unit: "pt",
+        format: [width, height],
+      });
+
+      const dpr = 4;
+      let screenshot = await view.takeScreenshot({
+        width: Math.round(width * dpr),
+        height: Math.round(height * dpr),
+        format: "png"
+      });
+
+      if (orientation === "portrait") {
+        pdf.setFillColor(255, 255, 255);
+        pdf.rect(0, 0, width, 50, "F"); // Kotak atas
+        pdf.setDrawColor(0, 0, 0);
+        pdf.rect(0, 0, width, 50); // Border kotak atas
+
+        pdf.rect(10, 60, width - 20, height - 70); // Border kotak bawah
+
+        // draw filename dekat border atas
+        pdf.setFontSize(18);
+        pdf.setTextColor(0, 0, 0);
+        pdf.text(fileName, width / 2, 30, { align: "center" });
+
+        // Add screenshot to bottom container
+        pdf.addImage(screenshot.dataUrl, "PNG", 10, 60, width - 20, height - 70);
+
+        let arrowWidth = 38;
+        let arrowHeight = 38;
+        let arrowMarginTop = 20;
+        let arrowMarginRight = 30;
+
+        if (northArrow === "on") {
+          const northArrowImg = `/icon/${selectedNorthArrowIcon}.png`;
+          const arrowX = width - arrowWidth - arrowMarginRight;
+          const arrowY = arrowMarginTop + 60;
+          pdf.addImage(northArrowImg, "PNG", arrowX, arrowY, arrowWidth, arrowHeight);
+
+          if (view.scale) {
+            const scaleValue = Math.round(view.scale);
+            const scaleStr = `Skala 1:${scaleValue.toLocaleString("en-US")}`;
+            const skalaFontSize = 8;
+            pdf.setFontSize(skalaFontSize);
+            pdf.setFont("helvetica", "normal");
+            pdf.setTextColor(0, 0, 0);
+
+            const skalaX = arrowX + arrowWidth / 2;
+            const skalaY = arrowY + arrowHeight + 12;
+
+            const textWidth = pdf.getTextWidth(scaleStr) + 6;
+            const textHeight = skalaFontSize + 4;
+            const rectX = skalaX - textWidth / 2;
+            const rectY = skalaY - skalaFontSize;
+            pdf.setFillColor(255, 255, 255);
+            pdf.setDrawColor(255, 255, 255);
+            pdf.rect(rectX, rectY, textWidth, textHeight, "F");
+
+            pdf.setTextColor(0, 0, 0);
+            pdf.text(scaleStr, skalaX, skalaY, { align: "center" });
+          }
+        }
+
+      } else if (orientation === "landscape") {
+        pdf.setFillColor(255, 255, 255);
+        pdf.rect(0, 0, 200, height, "F");
+        pdf.setDrawColor(0, 0, 0);
+        pdf.rect(0, 0, 200, height);
+
+        pdf.rect(210, 10, width - 220, height - 20);
+
+        pdf.setFontSize(18);
+        pdf.setTextColor(0, 0, 0);
+        pdf.text(fileName, 100, height / 2, { align: "center" });
+
+        pdf.addImage(screenshot.dataUrl, "PNG", 210, 10, width - 220, height - 20);
+
+        if (northArrow === "on") {
+
+          let arrowWidth = 38;
+          let arrowHeight = 38;
+          let arrowMarginTop = 30;
+          let arrowMarginRight = 30;
+
+          const northArrowImg = `/icon/${selectedNorthArrowIcon}.png`;
+          const arrowX = width - arrowWidth - arrowMarginRight;
+          const arrowY = arrowMarginTop;
+          pdf.addImage(northArrowImg, "PNG", arrowX, arrowY, arrowWidth, arrowHeight);
+
+          if (view.scale) {
+            const scaleValue = Math.round(view.scale);
+            const scaleStr = `Skala 1:${scaleValue.toLocaleString("en-US")}`;
+            const skalaFontSize = 8;
+            pdf.setFontSize(skalaFontSize);
+            pdf.setFont("helvetica", "normal");
+            pdf.setTextColor(0, 0, 0);
+
+            const skalaX = arrowX + arrowWidth / 2;
+            const skalaY = arrowY + arrowHeight + 12;
+
+            const textWidth = pdf.getTextWidth(scaleStr) + 6;
+            const textHeight = skalaFontSize + 4;
+            const rectX = skalaX - textWidth / 2;
+            const rectY = skalaY - skalaFontSize;
+            pdf.setFillColor(255, 255, 255);
+            pdf.setDrawColor(255, 255, 255);
+            pdf.rect(rectX, rectY, textWidth, textHeight, "F");
+
+            pdf.setTextColor(0, 0, 0);
+            pdf.text(scaleStr, skalaX, skalaY, { align: "center" });
+          }
+        }
+
+      }
+      const pdfBlob = pdf.output("blob");
+      const pdfUrl = URL.createObjectURL(pdfBlob);
+      window.open(pdfUrl, "_blank");
+    });
+    // -------------------------------END PRINT WIDGET ---------------------------------------------------
+
     if (view.popup) {
       view.popup.defaultPopupTemplateEnabled = true;
     }
@@ -222,11 +397,61 @@ function TrainingPage() {
 
   }, []);
   return (
-    <div ref={mapDiv} style={{ width: '100%', height: '98vh' }}></div>
+    <>
+      <div ref={mapDiv} style={{ width: '100%', height: '98vh' }}></div>
+      <div className="print-widget">
+        <div className="print-widget-scrollable">
+          <div className="section">
+            <label htmlFor="PrintFileName">File Name</label>
+            <input type="text" id="PrintFileName" placeholder="File name" />
+          </div>
+          <div className="section">
+            <label htmlFor="PrintLayout">Layout</label>
+            <select id="PrintLayout" >
+              <option value="a4">A4</option>
+              <option value="a3">A3</option>
+            </select>
+          </div>
+          <div className="section">
+            <label htmlFor="PrintOrientation">Orientation</label>
+            <select id="PrintOrientation">
+              <option value="portrait">Portrait</option>
+              <option value="landscape">Landscape</option>
+            </select>
+          </div>
+          <div className="section">
+            <label htmlFor="PrintNorthArrow">North Arrow</label>
+            <select id="PrintNorthArrow">
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+            <div className="north-arrow-select" id="northArrowSelect" >
+              <div className="north-arrow-option selected" data-icon="1" >
+                <img src="./icon/1.png" className="north-arrow-preview" alt="North Arrow 1" />
+              </div>
+              <div className="north-arrow-option" data-icon="2" >
+                <img src="./icon/2.png" className="north-arrow-preview" alt="North Arrow 2" />
+              </div>
+              <div className="north-arrow-option" data-icon="3" >
+                <img src="./icon/3.png" className="north-arrow-preview" alt="North Arrow 3" />
+              </div>
+            </div>
+          </div>
+          <button className="PrintExport" id="PrintExport" style={{}}>
+            Download
+          </button>
+        </div>
+      </div>
+    </>
   )
 }
 
-function switchTab(activeTab, tool) {
+interface SwitchTabParams {
+  activeTab: HTMLButtonElement;
+  tool: "distance" | "area" | null;
+}
+
+function switchTab(activeTab: SwitchTabParams["activeTab"], tool: SwitchTabParams["tool"]) {
   distanceTab.classList.remove("active");
   areaTab.classList.remove("active");
   clearTab.classList.remove("active");
