@@ -1,3 +1,4 @@
+
 import { useEffect, useRef, useState } from "react";
 import "@arcgis/core/assets/esri/themes/light/main.css";
 import MapView from "@arcgis/core/views/MapView";
@@ -45,7 +46,7 @@ function TrainingPage() {
   const [beforeLayer, setBeforeLayer] = useState<string>('');
   const [afterLayer, setAfterLayer] = useState<string>('');
   const [changeDetectionActive, setChangeDetectionActive] = useState<boolean>(false);
-  const changeDetectionLayerRef = useRef<ImageryLayer | __esri.TileLayer | null>(null);
+  const changeDetectionLayerRef = useRef<ImageryLayer | null>(null);
   const [showChangePanel, setShowChangePanel] = useState<boolean>(false);
   const [detectionMethod, setDetectionMethod] = useState<ChangeDetectionMethod>('difference');
   const [useBlendMode, setUseBlendMode] = useState<boolean>(false);
@@ -125,24 +126,11 @@ function TrainingPage() {
       title: "LULC 2021",
     });
 
-    const lulc23TestLayer = new MapImageLayer({
-      url: "https://dipan.map2u.com.my/server/rest/services/LULC23_test/MapServer",
-      title: "LULC 2023 Test",
-      sublayers: [{ id: 0 }],
-    });
-    const lulc21TestLayer = new MapImageLayer({
-      url: "https://dipan.map2u.com.my/server/rest/services/LandUse_2021/MapServer",
-      title: "LULC 2021 Test",
-      sublayers: [{ id: 0 }],
-    });
-
     map.add(featureLayer);
     map.add(featureLayer2);
     map.add(featureLayer3);
     map.add(changeDetectionLayer);
     map.add(changeDetectionLayer2);
-    map.add(lulc23TestLayer);
-    map.add(lulc21TestLayer);
 
 
     // const imageryLayer = new ImageryLayer({
@@ -761,32 +749,10 @@ function TrainingPage() {
 
       // Check if both URLs are ImageServer endpoints
       const isImageService = afterUrl.includes('ImageServer') && beforeUrl.includes('ImageServer');
-      const isTileLayer = beforeLayerObj.type === 'tile' && afterLayerObj.type === 'tile';
-      console.log('Is Image Service:', isImageService, '| Is Tile Layer:', isTileLayer);
-
-      // TileLayer: blend mode comparison
-      if (isTileLayer) {
-        // Make the before layer visible underneath
-        (beforeLayerObj as any).visible = true;
-        (beforeLayerObj as any).opacity = 1;
-
-        // Clone the after layer with difference blend mode on top
-        const { default: TileLayer } = await import('@arcgis/core/layers/TileLayer');
-        const blendLayer = new TileLayer({
-          url: afterUrl,
-          title: 'Change Detection (Tile Blend)',
-          opacity: 0.7,
-          blendMode: 'difference',
-        });
-        await blendLayer.load();
-        changeDetectionLayerRef.current = blendLayer as any;
-        map.add(blendLayer);
-        setChangeDetectionActive(true);
-        return;
-      }
+      console.log('Is Image Service:', isImageService);
 
       if (!isImageService) {
-        alert('Change detection requires ImageServer layers (ImageryLayer or ImageryTileLayer), or two TileLayers. Please select compatible layers.');
+        alert('Change detection requires ImageServer layers (ImageryLayer or ImageryTileLayer). Please select DSM layers.');
         return;
       }
 
@@ -999,7 +965,7 @@ function TrainingPage() {
           <div style={{ padding: '15px', borderBottom: '2px solid #0079c1' }}>
             <h3 style={{ margin: '0 0 5px 0', color: '#0079c1' }}>Change Detection</h3>
             <p style={{ margin: 0, fontSize: '12px', color: '#666' }}>
-              Detect changes between two layers using raster functions or blend mode
+              Detect changes between two imagery layers using raster functions
             </p>
           </div>
 
@@ -1137,18 +1103,18 @@ function TrainingPage() {
                 📌 How it works:
               </p>
               <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '12px', lineHeight: '1.6' }}>
-                <li>Select a "Before" layer (earlier time)</li>
-                <li>Select an "After" layer (later time)</li>
-                <li><strong>TileLayers:</strong> Automatically uses blend mode — dark = similar, bright = changed</li>
-                <li><strong>ImageryLayers (ImageServer):</strong> Choose a method:
+                <li>Select a "Before" imagery layer (earlier time)</li>
+                <li>Select an "After" imagery layer (later time)</li>
+                <li>Choose a detection method:
                   <ul style={{ marginTop: '5px' }}>
                     <li><strong>Difference:</strong> Shows pixel value differences</li>
                     <li><strong>Ratio:</strong> Shows proportional changes</li>
-                    <li><strong>Colormap:</strong> Color-coded changes</li>
+                    <li><strong>Colormap:</strong> Color-coded changes (blue=decrease, red=increase)</li>
                     <li><strong>Composite:</strong> Visual overlay comparison</li>
                   </ul>
                 </li>
-                <li>Works best when both layers cover the same area</li>
+                <li>Changes will be highlighted on the map</li>
+                <li>Works best with DSM or imagery layers from the same area</li>
               </ul>
             </div>
 
