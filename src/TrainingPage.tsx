@@ -17,9 +17,10 @@ import Measurement from "@arcgis/core/widgets/Measurement";
 import ImageryTileLayer from "@arcgis/core/layers/ImageryTileLayer";
 import MapImageLayer from "@arcgis/core/layers/MapImageLayer";
 import TileLayer from "@arcgis/core/layers/TileLayer";
-import RasterShadedReliefRenderer from "@arcgis/core/renderers/RasterShadedReliefRenderer";
-import * as colorRamps from "@arcgis/core/smartMapping/raster/support/colorRamps";
-import Basemap from "@arcgis/core/Basemap";
+import GeoJSONLayer from "@arcgis/core/layers/GeoJSONLayer";
+import esriRequest from "@arcgis/core/request";
+import SpatialReference from "@arcgis/core/geometry/SpatialReference";
+import * as webMercatorUtils from "@arcgis/core/geometry/support/webMercatorUtils";
 // import PortalItem from "@arcgis/core/portal/PortalItem";
 // import Portal from "@arcgis/core/portal/Portal";
 
@@ -37,6 +38,7 @@ interface LayerInfo {
 }
 
 type ChangeDetectionMethod = 'difference' | 'ratio' | 'ndvi' | 'composite';
+type TileBlendMode = 'difference' | 'multiply' | 'screen' | 'overlay' | 'exclusion';
 
 function TrainingPage() {
   const mapDiv = useRef(null);
@@ -49,6 +51,9 @@ function TrainingPage() {
   const [showChangePanel, setShowChangePanel] = useState<boolean>(false);
   const [detectionMethod, setDetectionMethod] = useState<ChangeDetectionMethod>('difference');
   const [useBlendMode, setUseBlendMode] = useState<boolean>(false);
+  const [tileBlendMode, setTileBlendMode] = useState<TileBlendMode>('difference');
+  const [hideDarkAreas, setHideDarkAreas] = useState<boolean>(false);
+  const [changeOpacity, setChangeOpacity] = useState<number>(0.7);
 
   useEffect(() => {
     if (!mapDiv.current) return;
@@ -119,22 +124,47 @@ function TrainingPage() {
     const changeDetectionLayer = new TileLayer({
       url: "https://dipan.map2u.com.my/server/rest/services/Hosted/LULC23/MapServer",
       title: "LULC 2023",
+      visible: false,
     });
     const changeDetectionLayer2 = new TileLayer({
       url: "https://dipan.map2u.com.my/server/rest/services/Hosted/LULC21/MapServer",
       title: "LULC 2021",
+      visible: false,
     });
 
     const lulc23TestLayer = new MapImageLayer({
       url: "https://dipan.map2u.com.my/server/rest/services/LULC23_test/MapServer",
       title: "LULC 2023 Test",
       sublayers: [{ id: 0 }],
+      visible: false,
     });
     const lulc21TestLayer = new MapImageLayer({
       url: "https://dipan.map2u.com.my/server/rest/services/LandUse_2021/MapServer",
       title: "LULC 2021 Test",
       sublayers: [{ id: 0 }],
+      visible: false,
     });
+
+    const lulc23NdviLayer = new TileLayer({
+      url: "https://dipan.map2u.com.my/server/rest/services/Hosted/LULC23_ndvi/MapServer",
+      title: "LULC 2023 NDVI",
+      visible: false,
+    });
+    const lulc21NdviLayer = new TileLayer({
+      url: "https://dipan.map2u.com.my/server/rest/services/Hosted/LULC21_ndvi/MapServer",
+      title: "LULC 2021 NDVI",
+      visible: false,
+    });
+    const reclassNdviCdLayer = new TileLayer({
+      url: "https://dipan.map2u.com.my/server/rest/services/Hosted/Reclass_NDVI_cd/MapServer",
+      title: "Reclass NDVI Change Detection",
+      visible: false,
+    });
+
+    map.add(lulc23NdviLayer);
+    map.add(lulc21NdviLayer);
+    map.add(reclassNdviCdLayer);
+    
 
     map.add(featureLayer);
     map.add(featureLayer2);
@@ -196,7 +226,7 @@ function TrainingPage() {
     legendContent.style.width = "400px";
     legendContent.style.display = "none";
 
-    const observer = new MutationObserver((mutations) => {
+    const observer = new MutationObserver(() => {
       document.querySelectorAll("calcite-action").forEach((listItem) => {
         const shadowRoot = listItem.shadowRoot;
         if (shadowRoot) {
@@ -215,7 +245,7 @@ function TrainingPage() {
     });
     observer.observe(document.body, { childList: true, subtree: true });
 
-    const layerList = new LayerList({
+    new LayerList({
       view: view,
       container: layerListContent,
       listItemCreatedFunction: function (event) {
@@ -226,7 +256,7 @@ function TrainingPage() {
         buttonContainer.style.alignItems = "center";
 
         // 🔍 Zoom Button (only for non-group layers)
-        if (item.layer.type !== "group") {
+        if (item.layer && item.layer.type !== "group") {
           const zoomButton = document.createElement("button");
           zoomButton.innerHTML = "🔍";
           zoomButton.title = "Zoom to Layer";
@@ -238,15 +268,17 @@ function TrainingPage() {
           zoomButton.style.cursor = "pointer";
 
           zoomButton.addEventListener("click", function () {
-            view.goTo(item.layer.fullExtent).catch((error) => {
-              console.error("Error zooming to layer:", error);
-            });
+            if (item.layer && 'fullExtent' in item.layer) {
+              view.goTo((item.layer as any).fullExtent).catch((error: any) => {
+                console.error("Error zooming to layer:", error);
+              });
+            }
           });
 
           buttonContainer.appendChild(zoomButton);
         }
 
-        if (item.layer.type === "group") {
+        if (item.layer && item.layer.type === "group") {
           const groupToggleButton = document.createElement("button");
           groupToggleButton.innerHTML = "🚫"; // Initial state, assume children are visible
           groupToggleButton.title = "Hide All Sub-layers";
@@ -311,11 +343,13 @@ function TrainingPage() {
         transparencySlider.min = "0";
         transparencySlider.max = "1";
         transparencySlider.step = "0.1";
-        transparencySlider.value = item.layer.opacity;
+        transparencySlider.value = item.layer ? String(item.layer.opacity) : '1';
         transparencySlider.style.width = "100%";
 
         transparencySlider.addEventListener("input", function () {
-          item.layer.opacity = parseFloat(transparencySlider.value);
+          if (item.layer) {
+            item.layer.opacity = parseFloat(transparencySlider.value);
+          }
         });
 
         transparencySliderContainer.appendChild(transparencySliderLabel);
@@ -331,7 +365,7 @@ function TrainingPage() {
         buttonContainer.appendChild(transparencyToggleButton);
 
         // 💡 Highlight Button (only for non-group layers)
-        if (item.layer.type !== "group") {
+        if (item.layer && item.layer.type !== "group") {
           const highlightButton = document.createElement("button");
           highlightButton.innerHTML = "💡";
           highlightButton.title = "Highlight Layer Features";
@@ -355,25 +389,22 @@ function TrainingPage() {
                 highlightButton.title = "Highlight Layer Features";
               } else {
                 // Get the layer view
-                const layerView = await view.whenLayerView(item.layer);
+                if (item.layer) {
+                  const layerView = await view.whenLayerView(item.layer as __esri.Layer);
 
-                // Check if the layer view supports querying features
-                if ("queryFeatures" in layerView) {
-                  // Highlight all features in the layer
-                  const featureSet = await (layerView as any).queryFeatures();
-                  highlightHandle = (layerView as any).highlight(
-                    featureSet.features
-                  );
+                  // Check if the layer view supports querying features
+                  if ("queryFeatures" in layerView) {
+                    // Highlight all features in the layer
+                    const featureSet = await (layerView as any).queryFeatures();
+                    highlightHandle = (layerView as any).highlight(
+                      featureSet.features
+                    );
 
-                  highlightButton.style.backgroundColor = "#ffeb3b";
-                  highlightButton.title = "Remove Highlight";
-                } else {
-                  await Swal.fire({
-                    icon: 'warning',
-                    title: 'Highlight Not Supported',
-                    text: 'This layer type does not support feature highlighting.',
-                    confirmButtonColor: '#0E7C79',
-                  });
+                    highlightButton.style.backgroundColor = "#ffeb3b";
+                    highlightButton.title = "Remove Highlight";
+                  } else {
+                    alert('This layer type does not support feature highlighting.');
+                  }
                 }
               }
             } catch (error) {
@@ -399,7 +430,7 @@ function TrainingPage() {
       },
     });
 
-    const legend = new Legend({
+    new Legend({
       view: view,
       container: legendContent,
     });
@@ -634,6 +665,397 @@ function TrainingPage() {
     // 🌟 Add Expand widget to the UI 
     view.ui.add(measurementExpand, "top-right");
 
+    // ─── Add Layer from URL Widget ───
+    const tempUserLayers: __esri.Layer[] = [];
+    const arcgisTokens: Record<string, string> = {};
+
+    const addLayerContainer = document.createElement("div");
+    addLayerContainer.className = "add-layer-container";
+    addLayerContainer.style.width = "500px";
+    addLayerContainer.style.backgroundColor = "white";
+    addLayerContainer.innerHTML = `
+      <div style="padding: 10px; background: white;">
+        <h3 style="margin-bottom: 10px;">🗂️ <strong>Add Temporary Layer</strong></h3>
+
+        <div style="margin-bottom: 15px;">
+          <label for="layer-url-input" style="display: block; margin-bottom: 5px;">🔗 Enter Layer URL</label>
+          <input id="layer-url-input" type="text" placeholder="e.g., https://.../FeatureServer/0" style="width: 100%; padding: 5px;" />
+          <small style="display: block; margin-top: 5px; color: #666;">
+            Supported: <strong>FeatureLayer</strong> (/FeatureServer/0), <strong>MapImageLayer</strong> (/MapServer),
+            <strong>ImageryLayer</strong> (/ImageServer), <strong>WMSLayer</strong> (/wms),
+            <strong>WMTSLayer</strong> (/wmts), <strong>WFSLayer</strong> (/wfs)
+          </small>
+        </div>
+
+        <div style="margin-bottom: 15px;">
+          <button id="add-layer-btn" style="margin-right: 10px;">➕ Add Layer</button>
+        </div>
+
+        <hr style="margin: 15px 0;" />
+
+        <div style="margin-bottom: 15px;">
+          <label for="upload-file" style="display: block; margin-bottom: 5px;">📁 Upload GeoJSON (.geojson), Shapefile (.zip), or CSV (.csv)</label>
+          <input type="file" id="upload-file" accept=".geojson,.json,.zip,.csv" />
+        </div>
+
+        <div id="layer-list" style="margin-top: 15px; width: 100%;">
+          <strong>🧾 Added Layers:</strong>
+          <ul id="layer-list-ul" style="margin-top: 5px; list-style: disc; background: #f9f9f9; padding: 10px; border-radius: 8px;"></ul>
+        </div>
+      </div>
+    `;
+
+    const urlInput = addLayerContainer.querySelector("#layer-url-input") as HTMLInputElement;
+    const addBtn = addLayerContainer.querySelector("#add-layer-btn") as HTMLButtonElement;
+    const layerListUL = addLayerContainer.querySelector("#layer-list-ul") as HTMLUListElement;
+
+    const updateAddLayerListUI = () => {
+      layerListUL.innerHTML = "";
+      tempUserLayers.forEach((layer, index) => {
+        const li = document.createElement("li");
+        li.style.display = "flex";
+        li.style.alignItems = "center";
+        li.style.justifyContent = "space-between";
+        li.style.gap = "8px";
+
+        const titleSpan = document.createElement("span");
+        titleSpan.textContent = layer.title || `Layer ${index + 1}`;
+
+        const removeBtn = document.createElement("button");
+        removeBtn.textContent = "❌";
+        removeBtn.title = "Remove this layer";
+        removeBtn.style.cssText = "background:transparent;border:none;cursor:pointer;font-size:10px;margin-left:auto;color:#dc3545;padding:2px 6px;";
+        removeBtn.onclick = () => {
+          map.remove(layer);
+          tempUserLayers.splice(index, 1);
+          updateAddLayerListUI();
+        };
+
+        li.appendChild(titleSpan);
+        li.appendChild(removeBtn);
+        layerListUL.appendChild(li);
+      });
+    };
+
+    addBtn?.addEventListener("click", async () => {
+      try {
+        const url = urlInput.value.trim();
+        if (!url) {
+          alert("Please enter a valid URL.");
+          return;
+        }
+
+        let authToken: string | null = null;
+        const isArcGISService =
+          url.includes("/rest/services/") ||
+          url.includes("/FeatureServer") ||
+          url.includes("/MapServer") ||
+          url.includes("/ImageServer") ||
+          url.includes("/SceneServer");
+
+        if (isArcGISService) {
+          try {
+            const parts = url.split("/rest/");
+            const serverUrl = parts[0];
+
+            if (!arcgisTokens[serverUrl]) {
+              let requiresAuth = false;
+              let isFederated = false;
+              let portalUrl = "";
+
+              try {
+                const testUrl = url.includes("?") ? `${url}&f=json` : `${url}?f=json`;
+                const testResponse = await fetch(testUrl);
+                if (testResponse.ok) {
+                  const testData = await testResponse.json();
+                  // Only treat real auth error codes as requiring login
+                  if (
+                    testData.error &&
+                    (testData.error.code === 499 ||
+                      testData.error.code === 498 ||
+                      testData.error.code === 401 ||
+                      testData.error.code === 403 ||
+                      testData.error.message?.toLowerCase().includes("token") ||
+                      testData.error.message?.toLowerCase().includes("credentials"))
+                  ) {
+                    requiresAuth = true;
+                  }
+                  // 500 or other server errors: assume public, skip auth
+                } else if (testResponse.status === 401 || testResponse.status === 403) {
+                  requiresAuth = true;
+                }
+                // 500, 502, etc. → skip auth, let the ArcGIS API handle it
+              } catch {
+                // CORS or network error → skip auth, try loading directly
+                requiresAuth = false;
+              }
+
+              if (requiresAuth) {
+                try {
+                  const infoResponse = await fetch(`${serverUrl}/rest/info?f=pjson`);
+                  const infoData = await infoResponse.json();
+                  if (infoData.owningSystemUrl) {
+                    isFederated = true;
+                    portalUrl = infoData.owningSystemUrl;
+                  }
+                } catch { /* ignore */ }
+
+                const username = window.prompt(
+                  `Authentication required for:\n${isFederated ? portalUrl : serverUrl}\n\nUsername:`
+                );
+                if (!username) { alert("Authentication cancelled."); return; }
+                const password = window.prompt("Password:");
+                if (!password) { alert("Authentication cancelled."); return; }
+
+                let tokenData: any;
+                if (isFederated && portalUrl) {
+                  const res = await fetch(`${portalUrl}/sharing/rest/generateToken`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: new URLSearchParams({ username, password, client: "referer", referer: window.location.origin, expiration: "60", f: "json" }),
+                  });
+                  tokenData = await res.json();
+                } else {
+                  const res = await fetch(`${serverUrl}/tokens/generateToken`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: new URLSearchParams({ username, password, client: "referer", referer: window.location.origin, expiration: "60", f: "json" }),
+                  });
+                  tokenData = await res.json();
+                }
+
+                if (tokenData?.token) {
+                  arcgisTokens[serverUrl] = tokenData.token;
+                  authToken = tokenData.token;
+                } else {
+                  throw new Error(tokenData?.error?.message || "Failed to generate token");
+                }
+              }
+            } else {
+              authToken = arcgisTokens[serverUrl];
+            }
+          } catch (error: any) {
+            console.warn("Auth check failed, attempting to load layer without authentication:", error);
+            // Don't bail out — let the ArcGIS API try to load the layer
+            authToken = null;
+          }
+        }
+
+        const tokenCustomParam = authToken ? { customParameters: { token: authToken } } : {};
+        const tokenApiKeyParam = authToken ? { apiKey: authToken } : {};
+        let layer: __esri.Layer | null = null;
+
+        if (url.includes("/FeatureServer") || url.match(/\/\d+$/)) {
+          layer = new FeatureLayer({ url, outFields: ["*"], ...tokenApiKeyParam });
+        } else if (url.includes("/ImageServer")) {
+          const { default: ImageryLayerDynamic } = await import("@arcgis/core/layers/ImageryLayer");
+          layer = new ImageryLayerDynamic({ url, ...tokenCustomParam });
+        } else if (url.match(/\/wms(server)?(\?|$|\/)/i) || url.match(/service=wms/i)) {
+          const { default: WMSLayer } = await import("@arcgis/core/layers/WMSLayer");
+          layer = new WMSLayer({ url, ...tokenCustomParam });
+        } else if (url.match(/\/wmts(\/|\?|$)/i) || url.match(/service=wmts/i)) {
+          const { default: WMTSLayer } = await import("@arcgis/core/layers/WMTSLayer");
+          layer = new WMTSLayer({ url, ...tokenCustomParam });
+        } else if (url.includes("/WFSServer") || url.match(/\/wfs(\?|$)/i) || url.match(/service=wfs/i)) {
+          const { default: WFSLayer } = await import("@arcgis/core/layers/WFSLayer");
+          const wfsUrl = url.replace(/\/WFSServer.*$/, "/WFSServer");
+          layer = new WFSLayer({ url: wfsUrl, outFields: ["*"], popupEnabled: true, ...tokenCustomParam } as any);
+        } else if (url.includes("/MapServer")) {
+          // Check if the service has tile cache; if so, use TileLayer (avoids 500 on dynamic export)
+          let useTileLayer = false;
+          try {
+            const infoUrl = url.includes("?") ? `${url}&f=json` : `${url}?f=json`;
+            const infoRes = await fetch(infoUrl);
+            if (infoRes.ok) {
+              const infoData = await infoRes.json();
+              useTileLayer = !!infoData.singleFusedMapCache;
+            }
+          } catch { /* ignore, fall back to MapImageLayer */ }
+
+          if (useTileLayer) {
+            layer = new TileLayer({ url, ...tokenCustomParam });
+          } else {
+            layer = new MapImageLayer({ url, ...tokenCustomParam });
+          }
+        } else {
+          alert("Unsupported layer type. Check the URL format.\n\nSupported: /FeatureServer, /MapServer, /ImageServer, /wms, /wmts, /wfs");
+          return;
+        }
+
+        map.add(layer);
+        tempUserLayers.push(layer);
+        updateAddLayerListUI();
+        urlInput.value = "";
+      } catch (err) {
+        console.error("Error adding layer:", err);
+        alert("❌ Failed to add layer. Check the console for details.");
+      }
+    });
+
+    // File upload handler
+    const uploadInput = addLayerContainer.querySelector("#upload-file") as HTMLInputElement;
+    uploadInput?.addEventListener("change", async () => {
+      try {
+        const file = uploadInput.files?.[0];
+        if (!file) return;
+        const filename = file.name.toLowerCase();
+
+        if (filename.endsWith(".csv")) {
+          const reader = new FileReader();
+          reader.onload = function (e) {
+            try {
+              const csvText = e.target?.result as string;
+              const lines = csvText.split("\n").filter((line) => line.trim());
+              if (lines.length < 2) { alert("❌ CSV must have at least a header and one data row."); return; }
+
+              const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
+              const latIndex = headers.findIndex((h) => h.includes("lat") || h.includes("latitude") || h === "y");
+              const lonIndex = headers.findIndex((h) => h.includes("lon") || h.includes("lng") || h.includes("longitude") || h === "x");
+              if (latIndex === -1 || lonIndex === -1) { alert("❌ CSV must contain lat/lon columns (e.g., lat, latitude, lon, longitude, x, y)."); return; }
+
+              const features: any[] = [];
+              for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(",").map((v) => v.trim());
+                const lat = parseFloat(values[latIndex]);
+                const lon = parseFloat(values[lonIndex]);
+                if (!isNaN(lat) && !isNaN(lon)) {
+                  const attributes: any = {};
+                  headers.forEach((h, idx) => { attributes[h] = values[idx] || ""; });
+                  features.push({ geometry: { type: "point", x: lon, y: lat, spatialReference: { wkid: 4326 } }, attributes });
+                }
+              }
+              if (features.length === 0) { alert("❌ No valid coordinate data found in CSV."); return; }
+
+              const randomColor = generateRandomColor();
+              const csvLayer = new FeatureLayer({
+                source: features,
+                objectIdField: "ObjectID",
+                fields: headers.map((h, idx) => ({ name: h, alias: h.charAt(0).toUpperCase() + h.slice(1), type: (idx === latIndex || idx === lonIndex ? "double" : "string") as any })),
+                geometryType: "point",
+                spatialReference: { wkid: 4326 },
+                title: file.name.replace(".csv", ""),
+                renderer: { type: "simple", symbol: { type: "simple-marker", color: randomColor, size: 8, outline: { color: [255, 255, 255, 0.8], width: 1 } } } as any,
+                popupTemplate: { title: file.name.replace(".csv", ""), content: [{ type: "fields", fieldInfos: headers.map((h) => ({ fieldName: h, label: h.charAt(0).toUpperCase() + h.slice(1) })) }] },
+              });
+              map.add(csvLayer);
+              tempUserLayers.push(csvLayer);
+              updateAddLayerListUI();
+              csvLayer.when(() => { view.goTo(csvLayer.fullExtent); });
+            } catch (err) { console.error(err); alert("❌ Failed to parse CSV file."); }
+          };
+          reader.readAsText(file);
+
+        } else if (filename.endsWith(".geojson") || filename.endsWith(".json")) {
+          const reader = new FileReader();
+          reader.onload = function (e) {
+            try {
+              const geojson = JSON.parse(e.target?.result as string);
+              const blob = new Blob([JSON.stringify(geojson)], { type: "application/json" });
+              const blobUrl = URL.createObjectURL(blob);
+              const randomColor = generateRandomColor();
+              const geojsonLayer = new GeoJSONLayer({ url: blobUrl, title: file.name.replace(/\.[^/.]+$/, "") });
+              map.add(geojsonLayer);
+              geojsonLayer.when(() => {
+                const gType = geojsonLayer.geometryType;
+                let renderer: any;
+                if (gType === "point" || gType === "multipoint") {
+                  renderer = { type: "simple", symbol: { type: "simple-marker", color: randomColor, size: 8, outline: { color: [255, 255, 255, 0.8], width: 1 } } };
+                } else if (gType === "polyline") {
+                  renderer = { type: "simple", symbol: { type: "simple-line", color: randomColor, width: 2 } };
+                } else if (gType === "polygon") {
+                  renderer = { type: "simple", symbol: { type: "simple-fill", color: randomColor, outline: { color: [255, 255, 255, 0.8], width: 1 } } };
+                }
+                if (renderer) geojsonLayer.renderer = renderer as any;
+              });
+              tempUserLayers.push(geojsonLayer);
+              updateAddLayerListUI();
+            } catch (err) { console.error(err); alert("❌ Invalid GeoJSON file."); }
+          };
+          reader.readAsText(file);
+
+        } else if (filename.endsWith(".zip")) {
+          const formData = new FormData();
+          formData.append("file", file);
+          const publishParameters = {
+            name: file.name.replace(".zip", ""),
+            targetSR: SpatialReference.WebMercator,
+            maxRecordCount: 1000,
+            enforceInputFileSizeLimit: true,
+            enforceOutputJsonSizeLimit: true,
+          };
+          try {
+            const response = await esriRequest("https://www.arcgis.com/sharing/rest/content/features/generate", {
+              method: "post",
+              query: { filetype: "shapefile", publishParameters: JSON.stringify(publishParameters), f: "json" },
+              body: formData,
+              responseType: "json",
+            });
+            const layerData = response.data.featureCollection?.layers?.[0];
+            if (!layerData) throw new Error("No layer found in uploaded shapefile.");
+
+            const objectIdField = "OBJECTID";
+            const hasOID = layerData.layerDefinition.fields.some((f: any) => f.type === "oid" || f.name === objectIdField);
+            if (!hasOID) {
+              layerData.layerDefinition.fields.push({ name: objectIdField, alias: objectIdField, type: "oid" });
+              layerData.featureSet.features.forEach((f: any, i: number) => { f.attributes[objectIdField] = i + 1; });
+              layerData.layerDefinition.objectIdField = objectIdField;
+            }
+            layerData.layerDefinition.fields = layerData.layerDefinition.fields.map((f: any) => ({ ...f, type: normalizeFieldType(f.type) }));
+            layerData.layerDefinition.geometryType = normalizeGeometryType(layerData.layerDefinition.geometryType);
+
+            const targetSR = new SpatialReference({ wkid: 102100 });
+            layerData.featureSet.features = layerData.featureSet.features.map((f: any) => {
+              const projected = webMercatorUtils.geographicToWebMercator(f.geometry) as any;
+              return { ...f, geometry: { ...projected, type: getGeometryTypeFromLayer(layerData.layerDefinition.geometryType) } };
+            });
+            // targetSR is used for the layer's spatial reference
+            void targetSR;
+
+            const randomColor = generateRandomColor();
+            const geometryType = layerData.layerDefinition.geometryType;
+            let renderer: any;
+            if (geometryType === "point") {
+              renderer = { type: "simple", symbol: { type: "simple-marker", color: randomColor, size: 8, outline: { color: [255, 255, 255, 0.8], width: 1 } } };
+            } else if (geometryType === "polyline") {
+              renderer = { type: "simple", symbol: { type: "simple-line", color: randomColor, width: 2 } };
+            } else if (geometryType === "polygon") {
+              renderer = { type: "simple", symbol: { type: "simple-fill", color: randomColor, outline: { color: [255, 255, 255, 0.8], width: 1 } } };
+            }
+
+            const shapefileLayer = new FeatureLayer({
+              source: layerData.featureSet.features,
+              fields: layerData.layerDefinition.fields,
+              objectIdField: layerData.layerDefinition.objectIdField,
+              geometryType: layerData.layerDefinition.geometryType,
+              spatialReference: SpatialReference.WebMercator,
+              title: file.name.replace(".zip", ""),
+              renderer: renderer as any,
+            });
+            map.add(shapefileLayer);
+            tempUserLayers.push(shapefileLayer);
+            updateAddLayerListUI();
+            alert("✅ Shapefile loaded successfully.");
+          } catch (err: any) {
+            console.error("❌ Shapefile upload failed:", err);
+            alert(`❌ Failed to upload shapefile.\n\n${err?.message || "Unknown error"}`);
+          }
+        } else {
+          alert("❌ Unsupported file format. Use .geojson, .json, .csv, or .zip");
+        }
+        uploadInput.value = "";
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    const addLayerExpand = new Expand({
+      view: view,
+      content: addLayerContainer,
+      expandTooltip: "Add Layer from URL / File",
+      expandIcon: "add-features",
+    });
+    view.ui.add(addLayerExpand, "top-left");
+
     const dsmLayers = [
       {
         url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/PRODUCTION_ELEVATION_DSM/PROD_DSM_MY701T_2008/ImageServer",
@@ -669,16 +1091,16 @@ function TrainingPage() {
       id: "dsm-group",
     });
 
-    dsmLayers.forEach(({ url, year, title }) => {
+    dsmLayers.forEach(({ url, title }) => {
       // Create ImageryTileLayer for display with color
-      const layer = new ImageryLayer({
+      const layer = new ImageryTileLayer({
         url,
         title: title, // Use the title from the array directly
         visible: false,
         // renderer: testrenderer,
         customParameters: {
           token:
-            'kfk2QmHIs6joGJARvDkIb4OK2ICk0rN49s5ZBTrfeCVS0Lvqbg9oHlJpw-6v1nuGU5sCXeX-tQv9GSORC_kawb-qR4bNk9dNsdHIc0Vd-YBzdvkBpbWyeQ4pfSAW04RUO-JqSTFeG_Ybkp50Na9Q4VnFRPIVBo2VzYdq8Z0OsWX3JEMCN7HEXZu3g9pZgJ0Q',
+            'Zf2RJQIaZs1vt7fEuIplPCQHIFTUalj1rcJvD32KDOjhH8n4jiWuxbmJudp3yppBNS1GpHcEdbm4q_nvR1F0JGUIWuDW5uusVPIqgFpcO9qpnP_4D8jkhW2i6UXMpUS1mhkULnTh-UFhCtWlYH5q9Kdw63TbzI3RULxJQllXN3ZI84Fulu3g4DdHcQi6yl1i',
         },
         popupTemplate: {
           title: title,
@@ -731,12 +1153,14 @@ function TrainingPage() {
     const map = view.map;
 
     // Remove existing change detection layer if any
-    if (changeDetectionLayerRef.current) {
+    if (changeDetectionLayerRef.current && map) {
       map.remove(changeDetectionLayerRef.current);
       changeDetectionLayerRef.current = null;
     }
 
     try {
+      if (!map) return;
+      
       // Get the selected layers
       const beforeLayerObj = map.allLayers.find(l => l.id === beforeLayer);
       const afterLayerObj = map.allLayers.find(l => l.id === afterLayer);
@@ -770,18 +1194,27 @@ function TrainingPage() {
         (beforeLayerObj as any).visible = true;
         (beforeLayerObj as any).opacity = 1;
 
-        // Clone the after layer with difference blend mode on top
+        // Clone the after layer with blend mode on top
         const { default: TileLayer } = await import('@arcgis/core/layers/TileLayer');
         const blendLayer = new TileLayer({
           url: afterUrl,
-          title: 'Change Detection (Tile Blend)',
-          opacity: 0.7,
-          blendMode: 'difference',
+          title: `Change Detection (${tileBlendMode})`,
+          opacity: changeOpacity,
+          blendMode: tileBlendMode as any,
+          effect: hideDarkAreas ? 'brightness(150%) contrast(200%)' : undefined,
         });
         await blendLayer.load();
         changeDetectionLayerRef.current = blendLayer as any;
         map.add(blendLayer);
         setChangeDetectionActive(true);
+        
+        const modeDesc = tileBlendMode === 'difference' ? 'Dark = no change, Bright = changed' :
+                        tileBlendMode === 'multiply' ? 'Keeps darker areas (highlights removal)' :
+                        tileBlendMode === 'screen' ? 'Keeps brighter areas (highlights addition)' :
+                        tileBlendMode === 'overlay' ? 'Enhanced contrast for changes' :
+                        'Mutual exclusion highlighting';
+        
+        alert(`TileLayer change detection created!\n\nBlend Mode: ${tileBlendMode}\n${modeDesc}\n\n${hideDarkAreas ? '✓ Dark areas enhanced for visibility' : ''}`);
         return;
       }
 
@@ -887,7 +1320,7 @@ function TrainingPage() {
           opacity: 0.5,
           blendMode: 'difference',
           customParameters: {
-            token: 'kfk2QmHIs6joGJARvDkIb4OK2ICk0rN49s5ZBTrfeCVS0Lvqbg9oHlJpw-6v1nuGU5sCXeX-tQv9GSORC_kawb-qR4bNk9dNsdHIc0Vd-YBzdvkBpbWyeQ4pfSAW04RUO-JqSTFeG_Ybkp50Na9Q4VnFRPIVBo2VzYdq8Z0OsWX3JEMCN7HEXZu3g9pZgJ0Q',
+            token: 'Zf2RJQIaZs1vt7fEuIplPCQHIFTUalj1rcJvD32KDOjhH8n4jiWuxbmJudp3yppBNS1GpHcEdbm4q_nvR1F0JGUIWuDW5uusVPIqgFpcO9qpnP_4D8jkhW2i6UXMpUS1mhkULnTh-UFhCtWlYH5q9Kdw63TbzI3RULxJQllXN3ZI84Fulu3g4DdHcQi6yl1i',
           }
         });
 
@@ -905,12 +1338,14 @@ function TrainingPage() {
         url: afterUrl,
         title: `Change Detection (${detectionMethod})`,
         opacity: 0.85,
-        renderingRule: renderingRuleJson as any,
         customParameters: {
-          token: 'kfk2QmHIs6joGJARvDkIb4OK2ICk0rN49s5ZBTrfeCVS0Lvqbg9oHlJpw-6v1nuGU5sCXeX-tQv9GSORC_kawb-qR4bNk9dNsdHIc0Vd-YBzdvkBpbWyeQ4pfSAW04RUO-JqSTFeG_Ybkp50Na9Q4VnFRPIVBo2VzYdq8Z0OsWX3JEMCN7HEXZu3g9pZgJ0Q',
+          token: 'Zf2RJQIaZs1vt7fEuIplPCQHIFTUalj1rcJvD32KDOjhH8n4jiWuxbmJudp3yppBNS1GpHcEdbm4q_nvR1F0JGUIWuDW5uusVPIqgFpcO9qpnP_4D8jkhW2i6UXMpUS1mhkULnTh-UFhCtWlYH5q9Kdw63TbzI3RULxJQllXN3ZI84Fulu3g4DdHcQi6yl1i',
           renderingRule: JSON.stringify(renderingRuleJson)
         }
-      });
+      } as any);
+      
+      // Set rendering rule after creation
+      (changeLayer as any).renderingRule = renderingRuleJson;
 
       console.log('Change layer created, loading...');
 
@@ -947,7 +1382,7 @@ function TrainingPage() {
       alert('Error creating change detection layer. Please ensure both layers are imagery layers with valid URLs.');
     }
   }; const removeChangeDetectionLayer = () => {
-    if (viewRef.current && changeDetectionLayerRef.current) {
+    if (viewRef.current && viewRef.current.map && changeDetectionLayerRef.current) {
       viewRef.current.map.remove(changeDetectionLayerRef.current);
       changeDetectionLayerRef.current = null;
       setChangeDetectionActive(false);
@@ -1074,6 +1509,72 @@ function TrainingPage() {
               <option value="composite">Composite (Side-by-side)</option>
             </select>
 
+            {/* TileLayer-specific options */}
+            <div style={{ 
+              marginBottom: '15px', 
+              padding: '10px', 
+              backgroundColor: '#f9f9f9', 
+              borderRadius: '4px',
+              border: '1px solid #e0e0e0'
+            }}>
+              <p style={{ margin: '0 0 10px 0', fontSize: '13px', fontWeight: 'bold', color: '#0079c1' }}>
+                🎨 TileLayer Options
+              </p>
+              
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '13px' }}>
+                Blend Mode:
+              </label>
+              <select
+                value={tileBlendMode}
+                onChange={(e) => setTileBlendMode(e.target.value as TileBlendMode)}
+                style={{
+                  width: '100%',
+                  padding: '8px',
+                  marginBottom: '10px',
+                  border: '1px solid #ccc',
+                  borderRadius: '4px',
+                  fontSize: '12px'
+                }}
+                disabled={changeDetectionActive}
+              >
+                <option value="difference">Difference (Symmetric)</option>
+                <option value="multiply">Multiply (Darkens)</option>
+                <option value="screen">Screen (Lightens)</option>
+                <option value="overlay">Overlay (Contrast)</option>
+                <option value="exclusion">Exclusion (Soft Difference)</option>
+              </select>
+
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '13px' }}>
+                Opacity: {changeOpacity.toFixed(1)}
+              </label>
+              <input
+                type="range"
+                min="0.1"
+                max="1"
+                step="0.1"
+                value={changeOpacity}
+                onChange={(e) => setChangeOpacity(parseFloat(e.target.value))}
+                disabled={changeDetectionActive}
+                style={{
+                  width: '100%',
+                  marginBottom: '10px'
+                }}
+              />
+
+              <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={hideDarkAreas}
+                  onChange={(e) => setHideDarkAreas(e.target.checked)}
+                  disabled={changeDetectionActive}
+                  style={{ marginRight: '8px' }}
+                />
+                <span style={{ fontSize: '12px' }}>
+                  Enhance visibility (brighten dark areas)
+                </span>
+              </label>
+            </div>
+
             <div style={{ marginBottom: '15px' }}>
               <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
                 <input
@@ -1084,7 +1585,7 @@ function TrainingPage() {
                   style={{ marginRight: '8px' }}
                 />
                 <span style={{ fontSize: '13px' }}>
-                  Use Blend Mode (simpler, may work better)
+                  Use Blend Mode for ImageLayers (simpler)
                 </span>
               </label>
             </div>
@@ -1139,7 +1640,16 @@ function TrainingPage() {
               <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '12px', lineHeight: '1.6' }}>
                 <li>Select a "Before" layer (earlier time)</li>
                 <li>Select an "After" layer (later time)</li>
-                <li><strong>TileLayers:</strong> Automatically uses blend mode — dark = similar, bright = changed</li>
+                <li><strong>TileLayers:</strong> Uses CSS blend modes for visual comparison
+                  <ul style={{ marginTop: '5px' }}>
+                    <li><strong>Difference:</strong> Dark = similar, Bright = changed</li>
+                    <li><strong>Multiply:</strong> Highlights areas removed/darkened</li>
+                    <li><strong>Screen:</strong> Highlights areas added/brightened</li>
+                    <li><strong>Overlay:</strong> High contrast, emphasizes all changes</li>
+                    <li><strong>Exclusion:</strong> Softer version of difference</li>
+                    <li>💡 Enable "Enhance visibility" to brighten output</li>
+                  </ul>
+                </li>
                 <li><strong>ImageryLayers (ImageServer):</strong> Choose a method:
                   <ul style={{ marginTop: '5px' }}>
                     <li><strong>Difference:</strong> Shows pixel value differences</li>
@@ -1170,6 +1680,51 @@ function TrainingPage() {
       )}
     </div>
   )
+}
+
+function generateRandomColor(): [number, number, number, number] {
+  const r = Math.floor(Math.random() * 256);
+  const g = Math.floor(Math.random() * 256);
+  const b = Math.floor(Math.random() * 256);
+  return [r, g, b, 0.8];
+}
+
+function normalizeFieldType(type: string): string {
+  const map: Record<string, string> = {
+    esriFieldTypeOID: "oid",
+    esriFieldTypeInteger: "integer",
+    esriFieldTypeSmallInteger: "small-integer",
+    esriFieldTypeDouble: "double",
+    esriFieldTypeSingle: "single",
+    esriFieldTypeString: "string",
+    esriFieldTypeDate: "date",
+    esriFieldTypeGUID: "guid",
+    esriFieldTypeGlobalID: "global-id",
+    esriFieldTypeBlob: "blob",
+    esriFieldTypeRaster: "raster",
+    esriFieldTypeXML: "xml",
+    esriFieldTypeBigInteger: "big-integer",
+    esriFieldTypeTimestampOffset: "timestamp-offset",
+    esriFieldTypeDateOnly: "date-only",
+    esriFieldTypeTimeOnly: "time-only",
+  };
+  return map[type] || type;
+}
+
+function normalizeGeometryType(type: string): string {
+  const map: Record<string, string> = {
+    esriGeometryPoint: "point",
+    esriGeometryPolyline: "polyline",
+    esriGeometryPolygon: "polygon",
+    esriGeometryMultipoint: "multipoint",
+    esriGeometryMultipatch: "multipatch",
+    esriGeometryMesh: "mesh",
+  };
+  return map[type] || type;
+}
+
+function getGeometryTypeFromLayer(layerGeometryType: string): string {
+  return normalizeGeometryType(layerGeometryType);
 }
 
 function switchTab(activeTab: HTMLButtonElement, tool: string | null) {
