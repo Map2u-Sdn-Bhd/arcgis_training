@@ -21,6 +21,7 @@ import GeoJSONLayer from "@arcgis/core/layers/GeoJSONLayer";
 import esriRequest from "@arcgis/core/request";
 import SpatialReference from "@arcgis/core/geometry/SpatialReference";
 import * as webMercatorUtils from "@arcgis/core/geometry/support/webMercatorUtils";
+import * as geometryEngine from "@arcgis/core/geometry/geometryEngine";
 // import PortalItem from "@arcgis/core/portal/PortalItem";
 // import Portal from "@arcgis/core/portal/Portal";
 
@@ -55,6 +56,22 @@ function TrainingPage() {
   const [hideDarkAreas, setHideDarkAreas] = useState<boolean>(false);
   const [changeOpacity, setChangeOpacity] = useState<number>(0.7);
 
+  // ── Feature-layer (polygon) change detection state ──
+  const [cdMode, setCdMode] = useState<'raster' | 'feature'>('raster');
+  const [featureAvailableLayers, setFeatureAvailableLayers] = useState<LayerInfo[]>([]);
+  const [beforeFeatureLayer, setBeforeFeatureLayer] = useState<string>('');
+  const [afterFeatureLayer, setAfterFeatureLayer] = useState<string>('');
+  const [compareField, setCompareField] = useState<string>('gridcode');
+  const [featureLayerFields, setFeatureLayerFields] = useState<string[]>([]);
+  const [featureChangeActive, setFeatureChangeActive] = useState<boolean>(false);
+  const [featureChangeLoading, setFeatureChangeLoading] = useState<boolean>(false);
+  const [featureChangeStats, setFeatureChangeStats] = useState<{
+    totalArea: number;
+    changesByType: Record<string, number>;
+    featureCount: number;
+  } | null>(null);
+  const featureChangeResultRef = useRef<FeatureLayer | null>(null);
+
   useEffect(() => {
     if (!mapDiv.current) return;
     const map = new Map({
@@ -66,11 +83,11 @@ function TrainingPage() {
       center: [101.696504, 3.002282],
       zoom: 10,
       popup: {
-        dockEnabled: true,
-        dockOptions: {
-          buttonEnabled: true,
-          breakpoint: false,
-        },
+        dockEnabled: false,
+        // dockOptions: {
+        //   buttonEnabled: true,
+        //   breakpoint: false,
+        // },
       },
     });
 
@@ -161,6 +178,21 @@ function TrainingPage() {
       visible: false,
     });
 
+    const lulc21PolygonLayer = new FeatureLayer({
+      url: "https://dipan.map2u.com.my/server/rest/services/Hosted/Lulc21_Polygon/FeatureServer",
+      outFields: ["*"],
+      popupEnabled: true,
+      popupTemplate: popuptemplatetest,
+      visible: false,
+    });
+    const lulc23PolygonLayer = new FeatureLayer({
+      url: "https://dipan.map2u.com.my/server/rest/services/Hosted/Lulc23_Polygon/FeatureServer",
+      outFields: ["*"],
+      popupEnabled: true,
+      popupTemplate: popuptemplatetest,
+      visible: false,
+    });
+
     map.add(lulc23NdviLayer);
     map.add(lulc21NdviLayer);
     map.add(reclassNdviCdLayer);
@@ -173,6 +205,9 @@ function TrainingPage() {
     map.add(changeDetectionLayer2);
     map.add(lulc23TestLayer);
     map.add(lulc21TestLayer);
+
+    map.add(lulc21PolygonLayer);
+    map.add(lulc23PolygonLayer);
 
 
     // const imageryLayer = new ImageryLayer({
@@ -1121,6 +1156,7 @@ function TrainingPage() {
     // Collect available imagery layers for change detection
     view.when(() => {
       const layers: LayerInfo[] = [];
+      const fLayers: LayerInfo[] = [];
       map.allLayers.forEach((layer: __esri.Layer) => {
         if (layer.type === 'imagery' || layer.type === 'imagery-tile' || layer.type === 'tile' || layer.type === 'map-image') {
           layers.push({
@@ -1130,9 +1166,19 @@ function TrainingPage() {
             type: layer.type
           });
         }
+        if (layer.type === 'feature') {
+          fLayers.push({
+            id: layer.id,
+            title: layer.title || 'Untitled Layer',
+            url: (layer as any).url,
+            type: layer.type
+          });
+        }
       });
       setAvailableLayers(layers);
+      setFeatureAvailableLayers(fLayers);
       console.log('Available layers for change detection:', layers);
+      console.log('Available feature layers:', fLayers);
     });
 
     if (view.popup) {
@@ -1391,6 +1437,220 @@ function TrainingPage() {
     }
   };
 
+  // ── Feature Layer Change Detection ──
+  const runFeatureLayerChangeDetection = async () => {
+    if (!viewRef.current || !beforeFeatureLayer || !afterFeatureLayer) {
+      alert('Please select both before and after feature layers.');
+      return;
+    }
+    if (beforeFeatureLayer === afterFeatureLayer) {
+      alert('Please select two different layers.');
+      return;
+    }
+    if (!compareField.trim()) {
+      alert('Please enter a field name to compare (e.g. gridcode).');
+      return;
+    }
+
+    const view = viewRef.current;
+    const map = view.map as __esri.Map;
+
+    // Remove any existing result
+    if (featureChangeResultRef.current) {
+      map?.remove(featureChangeResultRef.current);
+      featureChangeResultRef.current = null;
+    }
+
+    setFeatureChangeLoading(true);
+    setFeatureChangeStats(null);
+
+    try {
+      const beforeFL = map?.allLayers.find(l => l.id === beforeFeatureLayer) as FeatureLayer | undefined;
+      const afterFL = map?.allLayers.find(l => l.id === afterFeatureLayer) as FeatureLayer | undefined;
+
+      if (!beforeFL || !afterFL) {
+        alert('Selected layers not found on the map.');
+        setFeatureChangeLoading(false);
+        return;
+      }
+
+      // Query all polygon features from both layers
+      const [beforeResult, afterResult] = await Promise.all([
+        (beforeFL as FeatureLayer).queryFeatures({ where: '1=1', outFields: ['*'], returnGeometry: true, num: 5000 }),
+        (afterFL as FeatureLayer).queryFeatures({ where: '1=1', outFields: ['*'], returnGeometry: true, num: 5000 }),
+      ]);
+
+      const beforeFeatures = beforeResult.features;
+      const afterFeatures = afterResult.features;
+
+      if (!beforeFeatures.length || !afterFeatures.length) {
+        alert('One or both layers returned no features. Check visibility and filters.');
+        setFeatureChangeLoading(false);
+        return;
+      }
+
+      const field = compareField.trim();
+      const changedFeatures: __esri.Graphic[] = [];
+      const changesByType: Record<string, number> = {};
+      let totalAreaSqm = 0;
+
+      // For each "after" feature, find intersecting "before" features and check if class changed
+      for (const afterFeat of afterFeatures) {
+        const afterGeom = afterFeat.geometry;
+        if (!afterGeom || afterGeom.type !== 'polygon') continue;
+        const afterVal = afterFeat.attributes?.[field];
+
+        for (const beforeFeat of beforeFeatures) {
+          const beforeGeom = beforeFeat.geometry;
+          if (!beforeGeom || beforeGeom.type !== 'polygon') continue;
+          const beforeVal = beforeFeat.attributes?.[field];
+
+          // Skip if class is same (unchanged)
+          if (String(afterVal) === String(beforeVal)) continue;
+
+          // Compute intersection
+          const intersection = geometryEngine.intersect(afterGeom, beforeGeom);
+          if (!intersection) continue;
+
+          // Only keep actual polygon intersections with area > 0
+          const areaSqm = geometryEngine.geodesicArea(intersection as __esri.Polygon, 'square-meters');
+          if (!areaSqm || areaSqm <= 0) continue;
+
+          const changeKey = `${beforeVal} → ${afterVal}`;
+          changesByType[changeKey] = (changesByType[changeKey] || 0) + areaSqm;
+          totalAreaSqm += areaSqm;
+
+          changedFeatures.push({
+            geometry: intersection,
+            attributes: {
+              OBJECTID: changedFeatures.length + 1,
+              change_from: String(beforeVal ?? 'N/A'),
+              change_to: String(afterVal ?? 'N/A'),
+              change_type: changeKey,
+              area_sqm: Math.round(areaSqm * 100) / 100,
+              area_ha: Math.round(areaSqm / 10000 * 10000) / 10000,
+            }
+          } as any);
+        }
+      }
+
+      if (changedFeatures.length === 0) {
+        alert('No changed areas detected.\n\nCheck that:\n• Both layers cover the same area\n• The compare field name is correct\n• The layers use the same coordinate system');
+        setFeatureChangeLoading(false);
+        return;
+      }
+
+      // Build unique change_type values and assign colors
+      const uniqueTypes = Object.keys(changesByType);
+      const palette = [
+        [255, 0, 0, 0.7], [255, 165, 0, 0.7], [128, 0, 128, 0.7], [0, 128, 0, 0.7],
+        [0, 0, 255, 0.7], [255, 20, 147, 0.7], [0, 206, 209, 0.7], [139, 69, 19, 0.7],
+      ];
+      const uniqueValueInfos = uniqueTypes.map((type, i) => {
+        const c = palette[i % palette.length] as number[];
+        return {
+          value: type,
+          symbol: {
+            type: 'simple-fill',
+            color: [c[0], c[1], c[2], c[3]],
+            outline: { color: [255, 255, 255, 0.6], width: 0.5 },
+          },
+          label: type,
+        };
+      });
+
+      const popupFields = [
+        { fieldName: 'change_from', label: 'From (Before)' },
+        { fieldName: 'change_to', label: 'To (After)' },
+        { fieldName: 'change_type', label: 'Change Type' },
+        { fieldName: 'area_sqm', label: 'Area (m²)' },
+        { fieldName: 'area_ha', label: 'Area (ha)' },
+      ];
+
+      const resultLayer = new FeatureLayer({
+        source: changedFeatures,
+        objectIdField: 'OBJECTID',
+        geometryType: 'polygon',
+        spatialReference: afterFeatures[0].geometry?.spatialReference ?? { wkid: 102100 } as any,
+        title: `Change Detection Result (${beforeFL.title} → ${afterFL.title})`,
+        fields: [
+          { name: 'OBJECTID', type: 'oid' },
+          { name: 'change_from', type: 'string', alias: 'From (Before)' },
+          { name: 'change_to', type: 'string', alias: 'To (After)' },
+          { name: 'change_type', type: 'string', alias: 'Change Type' },
+          { name: 'area_sqm', type: 'double', alias: 'Area (m²)' },
+          { name: 'area_ha', type: 'double', alias: 'Area (ha)' },
+        ],
+        renderer: {
+          type: 'unique-value',
+          field: 'change_type',
+          uniqueValueInfos,
+          defaultSymbol: {
+            type: 'simple-fill',
+            color: [200, 200, 200, 0.5],
+            outline: { color: [255, 255, 255, 0.4], width: 0.5 },
+          },
+        } as any,
+        popupTemplate: {
+          title: 'Change Detected',
+          content: [{ type: 'fields', fieldInfos: popupFields }],
+        },
+      });
+
+      map?.add(resultLayer);
+      featureChangeResultRef.current = resultLayer;
+      setFeatureChangeActive(true);
+      setFeatureChangeStats({
+        totalArea: Math.round(totalAreaSqm),
+        changesByType: Object.fromEntries(
+          Object.entries(changesByType).map(([k, v]) => [k, Math.round(v)])
+        ),
+        featureCount: changedFeatures.length,
+      });
+
+      // Zoom to result
+      resultLayer.when(() => {
+        if (resultLayer.fullExtent) {
+          viewRef.current?.goTo(resultLayer.fullExtent).catch(console.error);
+        }
+      });
+
+    } catch (err) {
+      console.error('Feature layer change detection failed:', err);
+      alert('Change detection failed. See console for details.');
+    } finally {
+      setFeatureChangeLoading(false);
+    }
+  };
+
+  const removeFeatureChangeDetection = () => {
+    if (viewRef.current && featureChangeResultRef.current) {
+      (viewRef.current.map as __esri.Map)?.remove(featureChangeResultRef.current);
+      featureChangeResultRef.current = null;
+    }
+    setFeatureChangeActive(false);
+    setFeatureChangeStats(null);
+    setBeforeFeatureLayer('');
+    setAfterFeatureLayer('');
+  };
+
+  // When before feature layer changes, load its fields for the compare-field dropdown
+  const loadFeatureLayerFields = async (layerId: string) => {
+    if (!viewRef.current || !layerId) { setFeatureLayerFields([]); return; }
+    const layer = (viewRef.current.map as __esri.Map)?.allLayers.find(l => l.id === layerId) as FeatureLayer | undefined;
+    if (!layer) return;
+    try {
+      await (layer as FeatureLayer).load();
+      const numericTypes = ['oid', 'integer', 'small-integer', 'double', 'single', 'big-integer', 'string'];
+      const fields = (layer as FeatureLayer).fields
+        .filter(f => numericTypes.includes(f.type))
+        .map(f => f.name);
+      setFeatureLayerFields(fields);
+      if (fields.includes('gridcode')) setCompareField('gridcode');
+      else if (fields.length > 0) setCompareField(fields[0]);
+    } catch { /* ignore */ }
+  };
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '98vh' }}>
       <div ref={mapDiv} style={{ width: '100%', height: '100%' }}></div>
@@ -1433,12 +1693,38 @@ function TrainingPage() {
         }}>
           <div style={{ padding: '15px', borderBottom: '2px solid #0079c1' }}>
             <h3 style={{ margin: '0 0 5px 0', color: '#0079c1' }}>Change Detection</h3>
-            <p style={{ margin: 0, fontSize: '12px', color: '#666' }}>
+            <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#666' }}>
               Detect changes between two layers using raster functions or blend mode
             </p>
+            {/* Mode tabs */}
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button
+                onClick={() => setCdMode('raster')}
+                style={{
+                  flex: 1, padding: '6px', fontSize: '12px', fontWeight: 'bold',
+                  borderRadius: '4px', border: 'none', cursor: 'pointer',
+                  backgroundColor: cdMode === 'raster' ? '#0079c1' : '#e0e0e0',
+                  color: cdMode === 'raster' ? 'white' : '#333',
+                }}
+              >
+                🖼️ Raster / Tile
+              </button>
+              <button
+                onClick={() => setCdMode('feature')}
+                style={{
+                  flex: 1, padding: '6px', fontSize: '12px', fontWeight: 'bold',
+                  borderRadius: '4px', border: 'none', cursor: 'pointer',
+                  backgroundColor: cdMode === 'feature' ? '#0079c1' : '#e0e0e0',
+                  color: cdMode === 'feature' ? 'white' : '#333',
+                }}
+              >
+                🗺️ Feature Layer
+              </button>
+            </div>
           </div>
 
           <div style={{ padding: '15px' }}>
+            {cdMode === 'raster' && (<>
             <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
               Before Layer (Time 1):
             </label>
@@ -1675,6 +1961,135 @@ function TrainingPage() {
                 </p>
               </div>
             )}
+            </>)}
+
+            {/* ── Feature Layer Change Detection UI ── */}
+            {cdMode === 'feature' && (<>
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
+                Before Feature Layer (Time 1):
+              </label>
+              <select
+                value={beforeFeatureLayer}
+                onChange={(e) => { setBeforeFeatureLayer(e.target.value); loadFeatureLayerFields(e.target.value); }}
+                style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+                disabled={featureChangeActive}
+              >
+                <option value="">Select a polygon feature layer...</option>
+                {featureAvailableLayers.map(layer => (
+                  <option key={layer.id} value={layer.id}>{layer.title}</option>
+                ))}
+              </select>
+
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
+                After Feature Layer (Time 2):
+              </label>
+              <select
+                value={afterFeatureLayer}
+                onChange={(e) => setAfterFeatureLayer(e.target.value)}
+                style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+                disabled={featureChangeActive}
+              >
+                <option value="">Select a polygon feature layer...</option>
+                {featureAvailableLayers.map(layer => (
+                  <option key={layer.id} value={layer.id}>{layer.title}</option>
+                ))}
+              </select>
+
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
+                Compare Field (e.g. gridcode):
+              </label>
+              {featureLayerFields.length > 0 ? (
+                <select
+                  value={compareField}
+                  onChange={(e) => setCompareField(e.target.value)}
+                  style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+                  disabled={featureChangeActive}
+                >
+                  {featureLayerFields.map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={compareField}
+                  onChange={(e) => setCompareField(e.target.value)}
+                  placeholder="e.g. gridcode"
+                  style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px', boxSizing: 'border-box' }}
+                  disabled={featureChangeActive}
+                />
+              )}
+
+              {!featureChangeActive ? (
+                <button
+                  onClick={runFeatureLayerChangeDetection}
+                  disabled={!beforeFeatureLayer || !afterFeatureLayer || featureChangeLoading}
+                  style={{
+                    width: '100%', padding: '10px',
+                    backgroundColor: beforeFeatureLayer && afterFeatureLayer ? '#28a745' : '#ccc',
+                    color: 'white', border: 'none', borderRadius: '4px',
+                    cursor: beforeFeatureLayer && afterFeatureLayer ? 'pointer' : 'not-allowed',
+                    fontSize: '14px', fontWeight: 'bold',
+                  }}
+                >
+                  {featureChangeLoading ? '⏳ Analysing...' : '🔍 Detect Changes'}
+                </button>
+              ) : (
+                <button
+                  onClick={removeFeatureChangeDetection}
+                  style={{
+                    width: '100%', padding: '10px', backgroundColor: '#d32f2f',
+                    color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer',
+                    fontSize: '14px', fontWeight: 'bold',
+                  }}
+                >
+                  ❌ Remove Result Layer
+                </button>
+              )}
+
+              {/* Results summary */}
+              {featureChangeStats && (
+                <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#f0fff4', borderRadius: '4px', borderLeft: '4px solid #28a745' }}>
+                  <p style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 'bold', color: '#155724' }}>
+                    ✅ Change Detection Results
+                  </p>
+                  <p style={{ margin: '0 0 4px 0', fontSize: '12px' }}>
+                    <strong>Changed polygons:</strong> {featureChangeStats.featureCount.toLocaleString()}
+                  </p>
+                  <p style={{ margin: '0 0 8px 0', fontSize: '12px' }}>
+                    <strong>Total changed area:</strong> {featureChangeStats.totalArea.toLocaleString()} m²
+                    &nbsp;({(featureChangeStats.totalArea / 10000).toFixed(2)} ha)
+                  </p>
+                  <p style={{ margin: '0 0 4px 0', fontSize: '12px', fontWeight: 'bold' }}>By change type:</p>
+                  <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
+                    {Object.entries(featureChangeStats.changesByType).map(([type, area]) => (
+                      <div key={type} style={{ fontSize: '11px', padding: '3px 0', borderBottom: '1px solid #d4edda' }}>
+                        <strong>{type}:</strong>&nbsp;
+                        {area.toLocaleString()} m² ({(area / 10000).toFixed(4)} ha)
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#f0f8ff', borderRadius: '4px', borderLeft: '4px solid #0079c1' }}>
+                <p style={{ margin: '0 0 6px 0', fontSize: '13px', fontWeight: 'bold' }}>📌 How it works:</p>
+                <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '12px', lineHeight: '1.6' }}>
+                  <li>Select two polygon FeatureLayers (e.g. from Raster-to-Polygon result)</li>
+                  <li>Choose the field that holds the class value (e.g. <code>gridcode</code>)</li>
+                  <li>Unchanged areas (same class) are <strong>removed</strong></li>
+                  <li>Changed areas are intersected and shown in a new result layer</li>
+                  <li>Area (m² and ha) is calculated for each change type</li>
+                  <li>Click a polygon on the map to see change details in the popup</li>
+                </ul>
+              </div>
+
+              {featureAvailableLayers.length === 0 && (
+                <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#fff3cd', borderRadius: '4px', borderLeft: '4px solid #ffc107' }}>
+                  <p style={{ margin: 0, fontSize: '12px', color: '#856404' }}>
+                    ⚠️ No FeatureLayers found on the map. Add your Raster-to-Polygon result layers first.
+                  </p>
+                </div>
+              )}
+            </>)}
           </div>
         </div>
       )}
