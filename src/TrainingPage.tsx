@@ -193,6 +193,20 @@ function TrainingPage() {
       visible: false,
     });
 
+    const lulc2021ImageryLayer = new ImageryLayer({
+      url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/Lulc2021/ImageServer",
+      title: "LULC 2021 Imagery",
+      visible: true,
+    });
+
+    const lulc2023ImageryLayer = new ImageryLayer({
+      url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/Lulc2023/ImageServer",
+      title: "LULC 2023 Imagery",
+      visible: true,
+    });
+
+    
+
     map.add(lulc23NdviLayer);
     map.add(lulc21NdviLayer);
     map.add(reclassNdviCdLayer);
@@ -208,6 +222,9 @@ function TrainingPage() {
 
     map.add(lulc21PolygonLayer);
     map.add(lulc23PolygonLayer);
+
+    map.add(lulc2021ImageryLayer);
+    map.add(lulc2023ImageryLayer);
 
 
     // const imageryLayer = new ImageryLayer({
@@ -1135,7 +1152,7 @@ function TrainingPage() {
         // renderer: testrenderer,
         customParameters: {
           token:
-            'Zf2RJQIaZs1vt7fEuIplPCQHIFTUalj1rcJvD32KDOjhH8n4jiWuxbmJudp3yppBNS1GpHcEdbm4q_nvR1F0JGUIWuDW5uusVPIqgFpcO9qpnP_4D8jkhW2i6UXMpUS1mhkULnTh-UFhCtWlYH5q9Kdw63TbzI3RULxJQllXN3ZI84Fulu3g4DdHcQi6yl1i',
+            'SaTyX6UXtUV8e6-cZRz_4jzbB_6LrE9t8bP2QvX3eGL0yc3levdKmbn4KHs2x9H0WdISMQPB_EQY-yjEsYkNSXP2Bfkr2DaJkORATe3J-RNRGvcbVCy8vqstXkKAnfkwZ-kqkSxaN6Ludsh2WJUVBPEim9WYXOWlRqJdiFUfgbz0VZak9lXc3opbqmJPm4FB',
         },
         popupTemplate: {
           title: title,
@@ -1204,6 +1221,8 @@ function TrainingPage() {
       changeDetectionLayerRef.current = null;
     }
 
+    let isImageryLayer = false; // Track layer type for error messages
+
     try {
       if (!map) return;
       
@@ -1232,9 +1251,10 @@ function TrainingPage() {
       // Check if both URLs are ImageServer endpoints
       const isImageService = afterUrl.includes('ImageServer') && beforeUrl.includes('ImageServer');
       const isTileLayer = beforeLayerObj.type === 'tile' && afterLayerObj.type === 'tile';
-      console.log('Is Image Service:', isImageService, '| Is Tile Layer:', isTileLayer);
+      isImageryLayer = beforeLayerObj.type === 'imagery' && afterLayerObj.type === 'imagery';
+      console.log('Is Image Service:', isImageService, '| Is Tile Layer:', isTileLayer, '| Is ImageryLayer:', isImageryLayer);
 
-      // TileLayer: blend mode comparison
+      // TileLayer: always use blend mode (only option for tiles)
       if (isTileLayer) {
         // Make the before layer visible underneath
         (beforeLayerObj as any).visible = true;
@@ -1264,7 +1284,50 @@ function TrainingPage() {
         return;
       }
 
-      if (!isImageService) {
+      // ImageryLayer: use blend mode (client-side, works with all ImageServers)
+      // Map detection method to the most appropriate blend mode
+      if (isImageryLayer) {
+        console.log('ImageryLayer detected - using client-side blend mode');
+
+        // Map detection method → blend mode
+        const methodBlendMap: Record<string, string> = {
+          difference: 'difference',   // bright = changed, dark = same
+          ratio:      'exclusion',     // similar to ratio, mutual exclusion
+          ndvi:       'difference',    // highlight vegetation change
+          composite:  'overlay',       // enhanced contrast
+        };
+        const resolvedBlendMode = useBlendMode ? tileBlendMode : (methodBlendMap[detectionMethod] ?? 'difference');
+
+        // Make the before layer visible underneath
+        (beforeLayerObj as any).visible = true;
+        (beforeLayerObj as any).opacity = 1;
+
+        // Add the after layer on top with the blend mode
+        const { default: ImageryLayer } = await import('@arcgis/core/layers/ImageryLayer');
+        const blendLayer = new ImageryLayer({
+          url: afterUrl,
+          title: `Change Detection (${detectionMethod})`,
+          opacity: changeOpacity,
+          blendMode: resolvedBlendMode as any,
+          effect: hideDarkAreas ? 'brightness(150%) contrast(200%)' : undefined,
+        });
+        await blendLayer.load();
+        changeDetectionLayerRef.current = blendLayer as any;
+        map.add(blendLayer);
+        setChangeDetectionActive(true);
+
+        const modeDesc: Record<string, string> = {
+          difference: 'Bright pixels = area changed, Dark = no change',
+          ratio:      'Highlights areas with ratio differences',
+          ndvi:       'Highlights vegetation change areas',
+          composite:  'Enhanced contrast showing changes',
+        };
+
+        alert(`Change Detection created!\n\nMethod: ${detectionMethod}\nBlend Mode applied: ${resolvedBlendMode}\n\n${modeDesc[detectionMethod] ?? ''}\n\n${hideDarkAreas ? '✓ Dark areas enhanced for visibility' : ''}\n\nNote: Client-side blend mode is used because the server does not support advanced raster functions.`);
+        return;
+      }
+
+      if (!isImageService && !isTileLayer) {
         alert('Change detection requires ImageServer layers (ImageryLayer or ImageryTileLayer), or two TileLayers. Please select compatible layers.');
         return;
       }
@@ -1366,7 +1429,7 @@ function TrainingPage() {
           opacity: 0.5,
           blendMode: 'difference',
           customParameters: {
-            token: 'Zf2RJQIaZs1vt7fEuIplPCQHIFTUalj1rcJvD32KDOjhH8n4jiWuxbmJudp3yppBNS1GpHcEdbm4q_nvR1F0JGUIWuDW5uusVPIqgFpcO9qpnP_4D8jkhW2i6UXMpUS1mhkULnTh-UFhCtWlYH5q9Kdw63TbzI3RULxJQllXN3ZI84Fulu3g4DdHcQi6yl1i',
+            token: 'SaTyX6UXtUV8e6-cZRz_4jzbB_6LrE9t8bP2QvX3eGL0yc3levdKmbn4KHs2x9H0WdISMQPB_EQY-yjEsYkNSXP2Bfkr2DaJkORATe3J-RNRGvcbVCy8vqstXkKAnfkwZ-kqkSxaN6Ludsh2WJUVBPEim9WYXOWlRqJdiFUfgbz0VZak9lXc3opbqmJPm4FB',
           }
         });
 
@@ -1385,7 +1448,7 @@ function TrainingPage() {
         title: `Change Detection (${detectionMethod})`,
         opacity: 0.85,
         customParameters: {
-          token: 'Zf2RJQIaZs1vt7fEuIplPCQHIFTUalj1rcJvD32KDOjhH8n4jiWuxbmJudp3yppBNS1GpHcEdbm4q_nvR1F0JGUIWuDW5uusVPIqgFpcO9qpnP_4D8jkhW2i6UXMpUS1mhkULnTh-UFhCtWlYH5q9Kdw63TbzI3RULxJQllXN3ZI84Fulu3g4DdHcQi6yl1i',
+          token: 'SaTyX6UXtUV8e6-cZRz_4jzbB_6LrE9t8bP2QvX3eGL0yc3levdKmbn4KHs2x9H0WdISMQPB_EQY-yjEsYkNSXP2Bfkr2DaJkORATe3J-RNRGvcbVCy8vqstXkKAnfkwZ-kqkSxaN6Ludsh2WJUVBPEim9WYXOWlRqJdiFUfgbz0VZak9lXc3opbqmJPm4FB',
           renderingRule: JSON.stringify(renderingRuleJson)
         }
       } as any);
@@ -1420,20 +1483,23 @@ function TrainingPage() {
         alert(`Change detection created!\n\nMethod: ${detectionMethod}\n\nIf you still see the original layer, try:\n1. Toggle layer visibility in Layer List\n2. Zoom in/out\n3. Try a different detection method\n\nCheck console for debugging info.`);
       } catch (loadError) {
         console.error('Error loading change layer:', loadError);
-        alert('Error loading change detection layer. The server might not support this raster function.');
+        alert('Error loading change detection layer. The server might not support this raster function.\n\n✅ SOLUTION: Enable "Use Blend Mode for ImageLayers (simpler)" checkbox and try again.\n\nBlend mode works with all ImageServers and doesn\'t require server-side processing.');
         return;
       }
     } catch (error) {
       console.error('Error creating change detection layer:', error);
-      alert('Error creating change detection layer. Please ensure both layers are imagery layers with valid URLs.');
+      const errorMsg = isImageryLayer 
+        ? 'Error creating change detection layer.\n\n✅ TIP: If you\'re using ImageryLayers, try enabling "Use Blend Mode for ImageLayers (simpler)" checkbox. Blend mode is more compatible and doesn\'t require server-side raster function support.'
+        : 'Error creating change detection layer. Please ensure both layers are imagery layers with valid URLs.';
+      alert(errorMsg);
     }
   }; const removeChangeDetectionLayer = () => {
     if (viewRef.current && viewRef.current.map && changeDetectionLayerRef.current) {
       viewRef.current.map.remove(changeDetectionLayerRef.current);
       changeDetectionLayerRef.current = null;
       setChangeDetectionActive(false);
-      setBeforeLayer('');
-      setAfterLayer('');
+      // setBeforeLayer('');
+      // setAfterLayer('');
     }
   };
 
