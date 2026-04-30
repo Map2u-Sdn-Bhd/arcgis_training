@@ -55,6 +55,16 @@ function TrainingPage() {
   const [tileBlendMode, setTileBlendMode] = useState<TileBlendMode>('difference');
   const [hideDarkAreas, setHideDarkAreas] = useState<boolean>(false);
   const [changeOpacity, setChangeOpacity] = useState<number>(0.7);
+  const [removeUnchanged, setRemoveUnchanged] = useState<boolean>(false);
+  const [changeThreshold, setChangeThreshold] = useState<number>(30);
+  const [cdLegend, setCdLegend] = useState<{
+    type: 'classified' | 'blend';
+    title: string;
+    items?: { label: string; imageData: string; color?: [number, number, number] }[];
+    blendDesc?: string;
+  } | null>(null);
+  const beforeLayerRefForCD = useRef<any>(null);
+  const cdBlobUrlRef = useRef<string | null>(null);
 
   // ── Feature-layer (polygon) change detection state ──
   const [cdMode, setCdMode] = useState<'raster' | 'feature'>('raster');
@@ -72,6 +82,19 @@ function TrainingPage() {
   } | null>(null);
   const featureChangeResultRef = useRef<FeatureLayer | null>(null);
 
+  // ── Swipe widget state ──
+  const [showSwipePanel, setShowSwipePanel] = useState<boolean>(false);
+  const [swipeBeforeLayer, setSwipeBeforeLayer] = useState<string>('');
+  const [swipeAfterLayer, setSwipeAfterLayer] = useState<string>('');
+  const [swipeActive, setSwipeActive] = useState<boolean>(false);
+  const swipeWidgetRef = useRef<any>(null);
+
+  // ── Raster CD statistics state ──
+  const [cdRasterStats, setCdRasterStats] = useState<{
+    greenPx: number; yellowPx: number; redPx: number;
+    greenHa: number; yellowHa: number; redHa: number; totalChangedHa: number;
+  } | null>(null);
+
   useEffect(() => {
     if (!mapDiv.current) return;
     const map = new Map({
@@ -80,7 +103,7 @@ function TrainingPage() {
     const view = new MapView({
       container: mapDiv.current as any,
       map,
-      center: [101.696504, 3.002282],
+      center: [102.52711221450218, 5.7326080728403],
       zoom: 10,
       popup: {
         dockEnabled: false,
@@ -196,13 +219,13 @@ function TrainingPage() {
     const lulc2021ImageryLayer = new ImageryLayer({
       url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/Lulc2021/ImageServer",
       title: "LULC 2021 Imagery",
-      visible: true,
+      visible: false,
     });
 
     const lulc2023ImageryLayer = new ImageryLayer({
       url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/Lulc2023/ImageServer",
       title: "LULC 2023 Imagery",
-      visible: true,
+      visible: false,
     });
 
     
@@ -581,7 +604,7 @@ function TrainingPage() {
       expandIcon: "legend",
     });
 
-    view.ui.add(combinedExpand, "top-right");
+    view.ui.add(combinedExpand, "top-left");
 
     // Basemap Gallery 
     const basemapGallery = new BasemapGallery({
@@ -1206,6 +1229,86 @@ function TrainingPage() {
     };
   }, []);
 
+  // Fetch legend items from an ImageServer legend endpoint
+  const fetchLegendItems = async (url: string): Promise<{ label: string; imageData: string }[]> => {
+    try {
+      const resp = await esriRequest(`${url}/legend`, { query: { f: 'json' }, responseType: 'json' });
+      const layers: any[] = resp?.data?.layers ?? [];
+      const items: { label: string; imageData: string }[] = [];
+      for (const lyr of layers) {
+        for (const item of (lyr.legend ?? [])) {
+          if (item.label !== undefined && item.imageData) {
+            items.push({ label: String(item.label), imageData: item.imageData });
+          }
+        }
+      }
+      return items;
+    } catch {
+      return [];
+    }
+  };
+
+  // Decode a base64 swatch PNG → sample center pixel color
+  const decodeLegendSwatchColor = async (imageData: string): Promise<[number, number, number] | null> => {
+    try {
+      const blob = await (await fetch(`data:image/png;base64,${imageData}`)).blob();
+      const bm = await createImageBitmap(blob);
+      const c = document.createElement('canvas');
+      c.width = 1; c.height = 1;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(bm, Math.floor(bm.width / 2), Math.floor(bm.height / 2), 1, 1, 0, 0, 1, 1);
+      const d = ctx.getImageData(0, 0, 1, 1).data;
+      return [d[0], d[1], d[2]];
+    } catch {
+      return null;
+    }
+  };
+
+  // Build legend from colors actually visible in the result canvas
+  const buildResultLegend = async (canvas: HTMLCanvasElement, afterUrl: string, afterTitle: string) => {
+    // 1. Collect unique non-transparent colors from the output canvas
+    const ctx = canvas.getContext('2d')!;
+    const { width, height } = canvas;
+    const data = ctx.getImageData(0, 0, width, height).data;
+    const uniqueColors: [number, number, number][] = [];
+    const seen = new Set<string>();
+    const step = 6;
+    for (let i = 0; i < data.length; i += 4 * step) {
+      if (data[i + 3] < 20) continue;
+      const r = Math.round(data[i] / 8) * 8;
+      const g = Math.round(data[i + 1] / 8) * 8;
+      const b = Math.round(data[i + 2] / 8) * 8;
+      const key = `${r},${g},${b}`;
+      if (!seen.has(key)) { seen.add(key); uniqueColors.push([r, g, b]); }
+    }
+
+    // 2. Fetch the after-layer classification legend
+    const legendItems = await fetchLegendItems(afterUrl);
+    if (!legendItems.length || !uniqueColors.length) {
+      setCdLegend({ type: 'classified', title: afterTitle, items: legendItems });
+      return;
+    }
+
+    // 3. Match each legend swatch color against colors in the canvas
+    const tolerance = 45;
+    const matched: { label: string; imageData: string; color?: [number, number, number] }[] = [];
+    for (const item of legendItems) {
+      const swatchColor = await decodeLegendSwatchColor(item.imageData);
+      if (!swatchColor) { matched.push(item); continue; }
+      const [sr, sg, sb] = swatchColor;
+      // Find the closest canvas color within tolerance
+      let bestDist = Infinity;
+      let bestColor: [number, number, number] | undefined;
+      for (const [cr, cg, cb] of uniqueColors) {
+        const dist = Math.sqrt((cr - sr) ** 2 + (cg - sg) ** 2 + (cb - sb) ** 2);
+        if (dist < bestDist) { bestDist = dist; bestColor = [cr, cg, cb]; }
+      }
+      if (bestDist <= tolerance) matched.push({ ...item, color: bestColor });
+    }
+
+    setCdLegend({ type: 'classified', title: afterTitle, items: matched.length > 0 ? matched : legendItems });
+  };
+
   const createChangeDetectionLayer = async () => {
     if (!viewRef.current || !beforeLayer || !afterLayer) {
       alert('Please select both before and after layers');
@@ -1284,47 +1387,277 @@ function TrainingPage() {
         return;
       }
 
-      // ImageryLayer: use blend mode (client-side, works with all ImageServers)
-      // Map detection method to the most appropriate blend mode
+      // ImageryLayer: snapshot (removeUnchanged) or explicit blend mode or fall through to rendering rules
       if (isImageryLayer) {
-        console.log('ImageryLayer detected - using client-side blend mode');
-
-        // Map detection method → blend mode
-        const methodBlendMap: Record<string, string> = {
-          difference: 'difference',   // bright = changed, dark = same
-          ratio:      'exclusion',     // similar to ratio, mutual exclusion
-          ndvi:       'difference',    // highlight vegetation change
-          composite:  'overlay',       // enhanced contrast
-        };
-        const resolvedBlendMode = useBlendMode ? tileBlendMode : (methodBlendMap[detectionMethod] ?? 'difference');
-
         // Make the before layer visible underneath
         (beforeLayerObj as any).visible = true;
         (beforeLayerObj as any).opacity = 1;
 
-        // Add the after layer on top with the blend mode
         const { default: ImageryLayer } = await import('@arcgis/core/layers/ImageryLayer');
-        const blendLayer = new ImageryLayer({
-          url: afterUrl,
-          title: `Change Detection (${detectionMethod})`,
-          opacity: changeOpacity,
-          blendMode: resolvedBlendMode as any,
-          effect: hideDarkAreas ? 'brightness(150%) contrast(200%)' : undefined,
-        });
-        await blendLayer.load();
-        changeDetectionLayerRef.current = blendLayer as any;
-        map.add(blendLayer);
-        setChangeDetectionActive(true);
 
-        const modeDesc: Record<string, string> = {
-          difference: 'Bright pixels = area changed, Dark = no change',
-          ratio:      'Highlights areas with ratio differences',
-          ndvi:       'Highlights vegetation change areas',
-          composite:  'Enhanced contrast showing changes',
-        };
+        if (removeUnchanged) {
+          // ── Snapshot approach: fetch both layer images, compare pixel-by-pixel ──
+          // This is reliable because both images are fetched fully before comparison,
+          // unlike the per-tile cache approach which suffers from timing races.
 
-        alert(`Change Detection created!\n\nMethod: ${detectionMethod}\nBlend Mode applied: ${resolvedBlendMode}\n\n${modeDesc[detectionMethod] ?? ''}\n\n${hideDarkAreas ? '✓ Dark areas enhanced for visibility' : ''}\n\nNote: Client-side blend mode is used because the server does not support advanced raster functions.`);
-        return;
+          const ext = view.extent;
+          const snapW = Math.min(Math.round(view.width * window.devicePixelRatio), 2048);
+          const snapH = Math.min(Math.round(view.height * window.devicePixelRatio), 2048);
+          const wkid = (ext.spatialReference as any)?.wkid ?? 102100;
+          const exportQuery = {
+            bbox: `${ext.xmin},${ext.ymin},${ext.xmax},${ext.ymax}`,
+            bboxSR: String(wkid),
+            size: `${snapW},${snapH}`,
+            imageSR: String(wkid),
+            format: 'png32',
+            f: 'image',
+          };
+
+          const [beforeResp, afterResp] = await Promise.all([
+            esriRequest(`${beforeUrl}/exportImage`, { query: exportQuery, responseType: 'blob' }),
+            esriRequest(`${afterUrl}/exportImage`, { query: exportQuery, responseType: 'blob' }),
+          ]);
+
+          const [beforeBitmap, afterBitmap] = await Promise.all([
+            createImageBitmap(beforeResp.data as Blob),
+            createImageBitmap(afterResp.data as Blob),
+          ]);
+
+          // Draw before → read pixels
+          const helperCanvas = document.createElement('canvas');
+          helperCanvas.width = snapW;
+          helperCanvas.height = snapH;
+          const helperCtx = helperCanvas.getContext('2d')!;
+          helperCtx.drawImage(beforeBitmap, 0, 0, snapW, snapH);
+          const beforeData = helperCtx.getImageData(0, 0, snapW, snapH).data;
+
+          // Draw after → read pixels
+          const outCanvas = document.createElement('canvas');
+          outCanvas.width = snapW;
+          outCanvas.height = snapH;
+          const outCtx = outCanvas.getContext('2d')!;
+          outCtx.drawImage(afterBitmap, 0, 0, snapW, snapH);
+          const afterData = outCtx.getImageData(0, 0, snapW, snapH).data;
+
+          // Build output: only keep pixels where change exceeds threshold
+          const outputImageData = outCtx.createImageData(snapW, snapH);
+          const alpha = Math.round(changeOpacity * 255);
+          for (let i = 0; i < afterData.length; i += 4) {
+            const dr = Math.abs(afterData[i]     - beforeData[i]);
+            const dg = Math.abs(afterData[i + 1] - beforeData[i + 1]);
+            const db = Math.abs(afterData[i + 2] - beforeData[i + 2]);
+            if ((dr + dg + db) / 3 >= changeThreshold) {
+              outputImageData.data[i]     = afterData[i];
+              outputImageData.data[i + 1] = afterData[i + 1];
+              outputImageData.data[i + 2] = afterData[i + 2];
+              outputImageData.data[i + 3] = alpha;
+            }
+            // else stays 0,0,0,0 → fully transparent
+          }
+          outCtx.putImageData(outputImageData, 0, 0);
+
+          const outBlob: Blob = await new Promise(resolve =>
+            outCanvas.toBlob(resolve as BlobCallback, 'image/png')
+          );
+          // Revoke any previous blob to avoid memory leaks
+          if (cdBlobUrlRef.current) URL.revokeObjectURL(cdBlobUrlRef.current);
+          const blobUrl = URL.createObjectURL(outBlob);
+          cdBlobUrlRef.current = blobUrl;
+
+          const { default: MediaLayer } = await import('@arcgis/core/layers/MediaLayer');
+          const { default: ImageElement } = await import('@arcgis/core/layers/support/ImageElement');
+          const { default: ExtentAndRotationGeoreference } = await import('@arcgis/core/layers/support/ExtentAndRotationGeoreference');
+
+          const mediaLayer = new MediaLayer({
+            source: [new ImageElement({
+              image: blobUrl,
+              georeference: new ExtentAndRotationGeoreference({ extent: ext }),
+            })],
+            title: `Change Detection (unchanged removed, Δ≥${changeThreshold})`,
+          });
+
+          changeDetectionLayerRef.current = mediaLayer as any;
+          map.add(mediaLayer);
+          setChangeDetectionActive(true);
+          buildResultLegend(outCanvas, afterUrl, afterLayerObj.title ?? 'After');
+          alert(`Change Detection applied to current view!\n\nOnly pixels with avg RGB difference ≥ ${changeThreshold}/255 are shown.\nUnchanged areas are fully transparent.\n\nTip: After panning or zooming, remove and re-apply to refresh the snapshot.`);
+          return;
+        }
+
+        if (useBlendMode) {
+          // ── User explicitly requested blend mode ──
+          const resolvedBlendMode = tileBlendMode;
+          const blendLayer = new ImageryLayer({
+            url: afterUrl,
+            title: `Change Detection (${detectionMethod} / ${resolvedBlendMode})`,
+            opacity: changeOpacity,
+            blendMode: resolvedBlendMode as any,
+            effect: hideDarkAreas ? 'brightness(150%) contrast(200%)' : undefined,
+          });
+          await blendLayer.load();
+          changeDetectionLayerRef.current = blendLayer as any;
+          map.add(blendLayer);
+          setChangeDetectionActive(true);
+          (() => {
+            const blendLegendDescs: Record<string, string> = {
+              difference: 'Black / dark = no change · Bright / colourful = area changed',
+              exclusion:  'Black / dark = no change · Bright = changed area',
+              multiply:   'Dark = overlap / no change · Light = area removed',
+              screen:     'Dark = area added · Light = overlap / no change',
+              overlay:    'Mid-grey = unchanged · Bright or dark = changed',
+              'hard-light': 'Mid-grey = unchanged · Bright or dark = changed',
+            };
+            setCdLegend({
+              type: 'blend',
+              title: resolvedBlendMode,
+              blendDesc: blendLegendDescs[resolvedBlendMode] ?? 'Bright / high-contrast areas indicate change',
+            });
+          })();
+          alert(`Change Detection created!\n\nBlend Mode: ${resolvedBlendMode}\n\n${hideDarkAreas ? '✓ Dark areas enhanced for visibility\n\n' : ''}Note: Bright / high-contrast areas indicate change.`);
+          return;
+        }
+
+        // ── Client-side heatmap difference for standard methods ──
+        // Server-side raster functions cannot reference two different ImageServer URLs,
+        // so we export both layers as images and compute the difference on the client.
+        {
+          const ext = view.extent;
+          const snapW = Math.min(Math.round(view.width * window.devicePixelRatio), 2048);
+          const snapH = Math.min(Math.round(view.height * window.devicePixelRatio), 2048);
+          const wkid = (ext.spatialReference as any)?.wkid ?? 102100;
+          const exportQuery = {
+            bbox: `${ext.xmin},${ext.ymin},${ext.xmax},${ext.ymax}`,
+            bboxSR: String(wkid),
+            size: `${snapW},${snapH}`,
+            imageSR: String(wkid),
+            format: 'png32',
+            f: 'image',
+          };
+
+          const [beforeResp, afterResp] = await Promise.all([
+            esriRequest(`${beforeUrl}/exportImage`, { query: exportQuery, responseType: 'blob' }),
+            esriRequest(`${afterUrl}/exportImage`, { query: exportQuery, responseType: 'blob' }),
+          ]);
+
+          const [beforeBitmap, afterBitmap] = await Promise.all([
+            createImageBitmap(beforeResp.data as Blob),
+            createImageBitmap(afterResp.data as Blob),
+          ]);
+
+          const helperCanvas = document.createElement('canvas');
+          helperCanvas.width = snapW; helperCanvas.height = snapH;
+          const helperCtx = helperCanvas.getContext('2d')!;
+          helperCtx.drawImage(beforeBitmap, 0, 0, snapW, snapH);
+          const beforeData = helperCtx.getImageData(0, 0, snapW, snapH).data;
+
+          const outCanvas = document.createElement('canvas');
+          outCanvas.width = snapW; outCanvas.height = snapH;
+          const outCtx = outCanvas.getContext('2d')!;
+          outCtx.drawImage(afterBitmap, 0, 0, snapW, snapH);
+          const afterData = outCtx.getImageData(0, 0, snapW, snapH).data;
+
+          const outputImageData = outCtx.createImageData(snapW, snapH);
+          const threshold = detectionMethod === 'ndvi' ? changeThreshold * 0.5 : changeThreshold;
+          // Helper: compute delta for a pixel index
+          const computeDelta = (i: number): number => {
+            if (detectionMethod === 'ratio') {
+              const bAvg = (beforeData[i] + beforeData[i + 1] + beforeData[i + 2]) / 3 + 1;
+              const aAvg = (afterData[i] + afterData[i + 1] + afterData[i + 2]) / 3;
+              return Math.min(255, Math.abs((aAvg / bAvg - 1) * 255));
+            }
+            const dr = Math.abs(afterData[i]     - beforeData[i]);
+            const dg = Math.abs(afterData[i + 1] - beforeData[i + 1]);
+            const db = Math.abs(afterData[i + 2] - beforeData[i + 2]);
+            return (dr + dg + db) / 3;
+          };
+
+          // Pass 1: find the max delta among changed pixels so breakpoints
+          // auto-scale to the actual data range (LULC class colors rarely span 0–255).
+          let maxObservedDelta = threshold; // fallback if nothing exceeds threshold
+          for (let i = 0; i < afterData.length; i += 4) {
+            if (afterData[i + 3] < 20 && beforeData[i + 3] < 20) continue;
+            const d = computeDelta(i);
+            if (d > maxObservedDelta) maxObservedDelta = d;
+          }
+          const autoRange = maxObservedDelta - threshold || 1;
+          const lowBreak  = threshold + autoRange * 0.33; // lower third  → green
+          const midBreak  = threshold + autoRange * 0.67; // middle third → yellow
+          //                                               // upper third  → red
+
+          // Pass 2: classify and paint
+          for (let i = 0; i < afterData.length; i += 4) {
+            if (afterData[i + 3] < 20 && beforeData[i + 3] < 20) continue;
+            const delta = computeDelta(i);
+            if (delta < threshold) continue; // unchanged — leave transparent
+
+            // Hard discrete classes — breakpoints scale to observed data range
+            let r: number, g: number, b: number;
+            if (delta < lowBreak) {
+              r = 0;   g = 200; b = 0;   // green  — low change
+            } else if (delta < midBreak) {
+              r = 255; g = 180; b = 0;   // yellow — moderate change
+            } else {
+              r = 220; g = 0;   b = 0;   // red    — high change
+            }
+            outputImageData.data[i]     = r;
+            outputImageData.data[i + 1] = g;
+            outputImageData.data[i + 2] = b;
+            outputImageData.data[i + 3] = 255; // full opacity — no semi-transparent bleed
+          }
+          outCtx.putImageData(outputImageData, 0, 0);
+
+          // Compute pixel-level statistics for the result heatmap
+          let _greenPx = 0, _yellowPx = 0, _redPx = 0;
+          for (let _i = 0; _i < outputImageData.data.length; _i += 4) {
+            if (outputImageData.data[_i + 3] === 0) continue;
+            const _pr = outputImageData.data[_i], _pg = outputImageData.data[_i + 1];
+            if (_pr < 50) _greenPx++;           // green  (0, 200, 0)
+            else if (_pg > 100) _yellowPx++;    // yellow (255, 180, 0)
+            else _redPx++;                      // red    (220, 0, 0)
+          }
+          const _extW = Math.abs(ext.xmax - ext.xmin);
+          const _extH = Math.abs(ext.ymax - ext.ymin);
+          const _pxAreaM2 = (_extW * _extH) / (snapW * snapH);
+          const _pxToHa = (px: number) => Math.round(px * _pxAreaM2 / 10000 * 100) / 100;
+          const _cdStats = {
+            greenPx: _greenPx, yellowPx: _yellowPx, redPx: _redPx,
+            greenHa: _pxToHa(_greenPx),
+            yellowHa: _pxToHa(_yellowPx),
+            redHa: _pxToHa(_redPx),
+            totalChangedHa: _pxToHa(_greenPx + _yellowPx + _redPx),
+          };
+
+          const outBlob: Blob = await new Promise(resolve =>
+            outCanvas.toBlob(resolve as BlobCallback, 'image/png')
+          );
+          if (cdBlobUrlRef.current) URL.revokeObjectURL(cdBlobUrlRef.current);
+          const blobUrl = URL.createObjectURL(outBlob);
+          cdBlobUrlRef.current = blobUrl;
+
+          const { default: MediaLayer } = await import('@arcgis/core/layers/MediaLayer');
+          const { default: ImageElement } = await import('@arcgis/core/layers/support/ImageElement');
+          const { default: ExtentAndRotationGeoreference } = await import('@arcgis/core/layers/support/ExtentAndRotationGeoreference');
+
+          const mediaLayer = new MediaLayer({
+            source: [new ImageElement({
+              image: blobUrl,
+              georeference: new ExtentAndRotationGeoreference({ extent: ext }),
+            })],
+            title: `Change Detection (${detectionMethod})`,
+          });
+
+          changeDetectionLayerRef.current = mediaLayer as any;
+          map.add(mediaLayer);
+          setChangeDetectionActive(true);
+          setCdRasterStats(_cdStats);
+          setCdLegend({
+            type: 'blend',
+            title: `Difference Heatmap (${detectionMethod})`,
+            blendDesc: 'Green = low change · Yellow = moderate change · Red = high change · Transparent = no change',
+          });
+          alert(`Change Detection applied!\n\nMethod: ${detectionMethod}\nThreshold: ${threshold.toFixed(0)}/255\n\nGreen = low change\nYellow = moderate change\nRed = high change\nTransparent = no change\n\nTip: Zoom or pan then re-apply to refresh the snapshot.`);
+          return;
+        }
       }
 
       if (!isImageService && !isTileLayer) {
@@ -1497,7 +1830,19 @@ function TrainingPage() {
     if (viewRef.current && viewRef.current.map && changeDetectionLayerRef.current) {
       viewRef.current.map.remove(changeDetectionLayerRef.current);
       changeDetectionLayerRef.current = null;
+      // Revoke blob URL if it was created for the snapshot approach
+      if (cdBlobUrlRef.current) {
+        URL.revokeObjectURL(cdBlobUrlRef.current);
+        cdBlobUrlRef.current = null;
+      }
+      // Clean up pixelFilter on the before layer if it was set
+      if (beforeLayerRefForCD.current) {
+        (beforeLayerRefForCD.current as any).pixelFilter = null;
+        beforeLayerRefForCD.current = null;
+      }
       setChangeDetectionActive(false);
+      setCdLegend(null);
+      setCdRasterStats(null);
       // setBeforeLayer('');
       // setAfterLayer('');
     }
@@ -1717,6 +2062,45 @@ function TrainingPage() {
     } catch { /* ignore */ }
   };
 
+  // ── Swipe widget ──
+  const createSwipeWidget = async () => {
+    if (!viewRef.current || !swipeBeforeLayer || !swipeAfterLayer) {
+      alert('Please select both leading and trailing layers for the swipe.');
+      return;
+    }
+    if (swipeWidgetRef.current) {
+      swipeWidgetRef.current.destroy();
+      swipeWidgetRef.current = null;
+    }
+    const view = viewRef.current;
+    const map = view.map as __esri.Map;
+    if (!map) { alert('Map not ready.'); return; }
+    const bLayer = map.allLayers.find(l => l.id === swipeBeforeLayer);
+    const aLayer = map.allLayers.find(l => l.id === swipeAfterLayer);
+    if (!bLayer || !aLayer) { alert('Selected layers not found.'); return; }
+    (bLayer as any).visible = true;
+    (aLayer as any).visible = true;
+    const { default: SwipeWidget } = await import('@arcgis/core/widgets/Swipe');
+    const swipe = new SwipeWidget({
+      view,
+      leadingLayers: [bLayer],
+      trailingLayers: [aLayer],
+      position: 50,
+      direction: 'horizontal',
+    });
+    view.ui.add(swipe);
+    swipeWidgetRef.current = swipe;
+    setSwipeActive(true);
+  };
+
+  const removeSwipeWidget = () => {
+    if (swipeWidgetRef.current) {
+      swipeWidgetRef.current.destroy();
+      swipeWidgetRef.current = null;
+    }
+    setSwipeActive(false);
+  };
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '98vh' }}>
       <div ref={mapDiv} style={{ width: '100%', height: '100%' }}></div>
@@ -1861,6 +2245,16 @@ function TrainingPage() {
               <option value="composite">Composite (Side-by-side)</option>
             </select>
 
+            {/* Method description tooltip */}
+            <div style={{ margin: '-8px 0 15px 0', padding: '8px 10px', fontSize: '12px', color: '#444', backgroundColor: '#eef6ff', borderRadius: '4px', borderLeft: '3px solid #0079c1', lineHeight: '1.5' }}>
+              ℹ️ {({
+                difference: 'Per-pixel absolute difference between layers. Green = low change · Yellow = moderate · Red = high change.',
+                ratio: 'Divides after-pixel by before-pixel values. Highlights proportional changes — useful for gradual land-cover shifts.',
+                ndvi: 'Vegetation-index-style comparison with a reduced threshold. Best for detecting vegetation loss or regrowth.',
+                composite: 'Same as Difference but with before/after order swapped. Compare which epoch appears visually brighter.',
+              } as Record<string, string>)[detectionMethod]}
+            </div>
+
             {/* TileLayer-specific options */}
             <div style={{ 
               marginBottom: '15px', 
@@ -1925,6 +2319,57 @@ function TrainingPage() {
                   Enhance visibility (brighten dark areas)
                 </span>
               </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', marginTop: '8px' }}>
+                <input
+                  type="checkbox"
+                  checked={removeUnchanged}
+                  onChange={(e) => setRemoveUnchanged(e.target.checked)}
+                  disabled={changeDetectionActive}
+                  style={{ marginRight: '8px' }}
+                />
+                <span style={{ fontSize: '12px' }}>
+                  Remove unchanged pixels (ImageryLayer only)
+                </span>
+              </label>
+
+              {removeUnchanged && (
+                <div style={{ marginTop: '8px', paddingLeft: '4px' }}>
+                  <label style={{ display: 'block', fontSize: '12px', marginBottom: '4px' }}>
+                    Change threshold: <strong>{changeThreshold}</strong> / 255
+                    <span style={{ color: '#888', fontSize: '11px', marginLeft: '6px' }}>
+                      (lower = more sensitive)
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
+
+            {/* Always-visible threshold slider */}
+            <div style={{ marginBottom: '15px', padding: '10px', backgroundColor: '#f9f9f9', borderRadius: '4px', border: '1px solid #e0e0e0' }}>
+              <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                <span style={{ fontWeight: 'bold', fontSize: '13px' }}>Change Threshold</span>
+                <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#0079c1', minWidth: '40px', textAlign: 'right' }}>
+                  {changeThreshold} <span style={{ fontWeight: 'normal', color: '#888', fontSize: '11px' }}>/ 255</span>
+                </span>
+              </label>
+              <input
+                type="range"
+                min="5"
+                max="120"
+                step="5"
+                value={changeThreshold}
+                onChange={(e) => setChangeThreshold(parseInt(e.target.value))}
+                disabled={changeDetectionActive}
+                style={{ width: '100%', marginBottom: '4px' }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#999' }}>
+                <span>5 — more sensitive</span>
+                <span>120 — less sensitive</span>
+              </div>
+              <p style={{ margin: '6px 0 0 0', fontSize: '11px', color: '#666', lineHeight: '1.4' }}>
+                Pixels with avg colour difference below this value are treated as unchanged (transparent).
+              </p>
             </div>
 
             <div style={{ marginBottom: '15px' }}>
@@ -1977,6 +2422,91 @@ function TrainingPage() {
               >
                 ❌ Remove Change Detection
               </button>
+            )}
+
+            {/* Raster change statistics */}
+            {changeDetectionActive && cdRasterStats && (
+              <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#f0fff4', borderRadius: '4px', borderLeft: '4px solid #28a745' }}>
+                <p style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 'bold', color: '#155724' }}>📊 Changed Area Statistics</p>
+                <p style={{ margin: '0 0 8px 0', fontSize: '12px' }}>
+                  <strong>Total changed area:</strong> {cdRasterStats.totalChangedHa.toLocaleString()} ha
+                </p>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <div style={{ flex: 1, padding: '6px', backgroundColor: '#e8f5e9', borderRadius: '4px', textAlign: 'center', borderLeft: '3px solid #4caf50' }}>
+                    <div style={{ fontSize: '11px', color: '#388e3c', fontWeight: 'bold' }}>Low Change</div>
+                    <div style={{ fontSize: '13px', fontWeight: 'bold' }}>{cdRasterStats.greenHa} ha</div>
+                    <div style={{ fontSize: '10px', color: '#666' }}>{cdRasterStats.greenPx.toLocaleString()} px</div>
+                  </div>
+                  <div style={{ flex: 1, padding: '6px', backgroundColor: '#fff8e1', borderRadius: '4px', textAlign: 'center', borderLeft: '3px solid #ffc107' }}>
+                    <div style={{ fontSize: '11px', color: '#f57f17', fontWeight: 'bold' }}>Moderate</div>
+                    <div style={{ fontSize: '13px', fontWeight: 'bold' }}>{cdRasterStats.yellowHa} ha</div>
+                    <div style={{ fontSize: '10px', color: '#666' }}>{cdRasterStats.yellowPx.toLocaleString()} px</div>
+                  </div>
+                  <div style={{ flex: 1, padding: '6px', backgroundColor: '#ffebee', borderRadius: '4px', textAlign: 'center', borderLeft: '3px solid #f44336' }}>
+                    <div style={{ fontSize: '11px', color: '#c62828', fontWeight: 'bold' }}>High Change</div>
+                    <div style={{ fontSize: '13px', fontWeight: 'bold' }}>{cdRasterStats.redHa} ha</div>
+                    <div style={{ fontSize: '10px', color: '#666' }}>{cdRasterStats.redPx.toLocaleString()} px</div>
+                  </div>
+                </div>
+                <p style={{ margin: '6px 0 0 0', fontSize: '10px', color: '#888' }}>* Approximate. Re-apply after panning/zooming to refresh.</p>
+              </div>
+            )}
+
+            {changeDetectionActive && cdLegend && (
+              <div style={{
+                marginTop: '15px',
+                padding: '10px',
+                backgroundColor: '#fff',
+                border: '1px solid #ddd',
+                borderRadius: '4px',
+              }}>
+                <p style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 'bold' }}>🎨 Result Legend</p>
+
+                {/* Classified result: show only classes visible in the changed areas */}
+                {cdLegend.type === 'classified' && cdLegend.items && (
+                  <>
+                    <p style={{ margin: '0 0 6px 0', fontSize: '11px', color: '#555' }}>
+                      Land cover classes visible in changed areas:
+                    </p>
+                    <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                      {cdLegend.items.length === 0 ? (
+                        <span style={{ fontSize: '11px', color: '#888', fontStyle: 'italic' }}>No matched classes found</span>
+                      ) : (
+                        cdLegend.items.map((item, idx) => (
+                          <div key={idx} style={{ display: 'flex', alignItems: 'center', marginBottom: '5px' }}>
+                            {item.color ? (
+                              <div style={{
+                                width: '22px', height: '22px', marginRight: '8px', flexShrink: 0,
+                                backgroundColor: `rgb(${item.color[0]},${item.color[1]},${item.color[2]})`,
+                                border: '1px solid rgba(0,0,0,0.2)', borderRadius: '3px',
+                              }} />
+                            ) : (
+                              <img
+                                src={`data:image/png;base64,${item.imageData}`}
+                                alt={item.label}
+                                style={{ width: '22px', height: '22px', marginRight: '8px', border: '1px solid #ccc', flexShrink: 0 }}
+                              />
+                            )}
+                            <span style={{ fontSize: '12px' }}>{item.label || '—'}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {/* Blend mode result: explain what the output colors mean */}
+                {cdLegend.type === 'blend' && (
+                  <>
+                    <p style={{ margin: '0 0 4px 0', fontSize: '11px', color: '#555' }}>
+                      Blend mode: <strong>{cdLegend.title}</strong>
+                    </p>
+                    <p style={{ margin: 0, fontSize: '12px', color: '#333', lineHeight: '1.5' }}>
+                      {cdLegend.blendDesc}
+                    </p>
+                  </>
+                )}
+              </div>
             )}
 
             <div style={{
@@ -2157,6 +2687,108 @@ function TrainingPage() {
               )}
             </>)}
           </div>
+        </div>
+      )}
+
+      {/* Swipe Widget Button */}
+      <button
+        onClick={() => setShowSwipePanel(!showSwipePanel)}
+        style={{
+          position: 'absolute',
+          bottom: '40px',
+          right: '210px',
+          padding: '10px 15px',
+          backgroundColor: '#6a1b9a',
+          color: 'white',
+          border: 'none',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          fontSize: '14px',
+          fontWeight: 'bold',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+          zIndex: 1000,
+        }}
+      >
+        {showSwipePanel ? 'Hide' : 'Show'} Swipe
+      </button>
+
+      {/* Swipe Widget Panel */}
+      {showSwipePanel && (
+        <div style={{
+          position: 'absolute',
+          bottom: '90px',
+          right: '210px',
+          width: '300px',
+          backgroundColor: 'white',
+          borderRadius: '8px',
+          boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
+          zIndex: 1000,
+          padding: '15px',
+        }}>
+          <h3 style={{ margin: '0 0 5px 0', color: '#6a1b9a' }}>&#8644; Swipe Comparison</h3>
+          <p style={{ margin: '0 0 12px 0', fontSize: '12px', color: '#666' }}>
+            Drag the divider on the map to compare two layers side by side.
+          </p>
+
+          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '13px' }}>
+            Leading layer (left):
+          </label>
+          <select
+            value={swipeBeforeLayer}
+            onChange={(e) => setSwipeBeforeLayer(e.target.value)}
+            disabled={swipeActive}
+            style={{ width: '100%', padding: '7px', marginBottom: '12px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+          >
+            <option value="">Select layer...</option>
+            {availableLayers.map(l => (
+              <option key={l.id} value={l.id}>{l.title} ({l.type})</option>
+            ))}
+          </select>
+
+          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '13px' }}>
+            Trailing layer (right):
+          </label>
+          <select
+            value={swipeAfterLayer}
+            onChange={(e) => setSwipeAfterLayer(e.target.value)}
+            disabled={swipeActive}
+            style={{ width: '100%', padding: '7px', marginBottom: '12px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+          >
+            <option value="">Select layer...</option>
+            {availableLayers.map(l => (
+              <option key={l.id} value={l.id}>{l.title} ({l.type})</option>
+            ))}
+          </select>
+
+          {!swipeActive ? (
+            <button
+              onClick={createSwipeWidget}
+              disabled={!swipeBeforeLayer || !swipeAfterLayer}
+              style={{
+                width: '100%', padding: '9px',
+                backgroundColor: swipeBeforeLayer && swipeAfterLayer ? '#6a1b9a' : '#ccc',
+                color: 'white', border: 'none', borderRadius: '4px', cursor: swipeBeforeLayer && swipeAfterLayer ? 'pointer' : 'not-allowed',
+                fontSize: '14px', fontWeight: 'bold',
+              }}
+            >
+              &#8644; Start Swipe
+            </button>
+          ) : (
+            <button
+              onClick={removeSwipeWidget}
+              style={{
+                width: '100%', padding: '9px', backgroundColor: '#d32f2f',
+                color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer',
+                fontSize: '14px', fontWeight: 'bold',
+              }}
+            >
+              &#10006; Remove Swipe
+            </button>
+          )}
+
+          <p style={{ margin: '10px 0 0 0', fontSize: '11px', color: '#888', lineHeight: '1.5' }}>
+            &#9432; Both selected layers will be made visible. Drag the handle to compare.
+          </p>
         </div>
       )}
     </div>
