@@ -1393,8 +1393,6 @@ function TrainingPage() {
         (beforeLayerObj as any).visible = true;
         (beforeLayerObj as any).opacity = 1;
 
-        const { default: ImageryLayer } = await import('@arcgis/core/layers/ImageryLayer');
-
         if (removeUnchanged) {
           // ── Snapshot approach: fetch both layer images, compare pixel-by-pixel ──
           // This is reliable because both images are fetched fully before comparison,
@@ -1485,18 +1483,38 @@ function TrainingPage() {
         }
 
         if (useBlendMode) {
-          // ── User explicitly requested blend mode ──
+          // ── Group-layer blend mode approach ──
+          // The after layer blends only against the before layer inside the group,
+          // so the basemap below is NOT included in the blend — avoiding the "darken all" issue.
+          const { default: ImageryLayerDyn } = await import('@arcgis/core/layers/ImageryLayer');
+          const { default: GroupLayerDyn } = await import('@arcgis/core/layers/GroupLayer');
+
           const resolvedBlendMode = tileBlendMode;
-          const blendLayer = new ImageryLayer({
+
+          const beforeClone = new ImageryLayerDyn({
+            url: beforeUrl,
+            title: `CD Before (${beforeLayerObj.title ?? 'Before'})`,
+            opacity: 1,
+          });
+
+          const afterClone = new ImageryLayerDyn({
             url: afterUrl,
-            title: `Change Detection (${detectionMethod} / ${resolvedBlendMode})`,
+            title: `CD After (${afterLayerObj.title ?? 'After'})`,
             opacity: changeOpacity,
             blendMode: resolvedBlendMode as any,
             effect: hideDarkAreas ? 'brightness(150%) contrast(200%)' : undefined,
           });
-          await blendLayer.load();
-          changeDetectionLayerRef.current = blendLayer as any;
-          map.add(blendLayer);
+
+          // blendMode on the group clips the blend result to the group boundary
+          // so it composites cleanly against the basemap
+          const cdGroup = new GroupLayerDyn({
+            title: `Change Detection (${resolvedBlendMode})`,
+            layers: [beforeClone, afterClone],
+            opacity: 1,
+          });
+
+          changeDetectionLayerRef.current = cdGroup as any;
+          map.add(cdGroup);
           setChangeDetectionActive(true);
           (() => {
             const blendLegendDescs: Record<string, string> = {
