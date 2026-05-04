@@ -75,6 +75,8 @@ function TrainingPage() {
   const [featureLayerFields, setFeatureLayerFields] = useState<string[]>([]);
   const [featureChangeActive, setFeatureChangeActive] = useState<boolean>(false);
   const [featureChangeLoading, setFeatureChangeLoading] = useState<boolean>(false);
+  const [featureChangeProgress, setFeatureChangeProgress] = useState<string>('');
+  const [featureQueryLimit, setFeatureQueryLimit] = useState<number>(0); // 0 = fetch all
   const [featureChangeStats, setFeatureChangeStats] = useState<{
     totalArea: number;
     changesByType: Record<string, number>;
@@ -205,14 +207,14 @@ function TrainingPage() {
       url: "https://dipan.map2u.com.my/server/rest/services/Hosted/Lulc21_Polygon/FeatureServer",
       outFields: ["*"],
       popupEnabled: true,
-      popupTemplate: popuptemplatetest,
+      // popupTemplate: popuptemplatetest,
       visible: false,
     });
     const lulc23PolygonLayer = new FeatureLayer({
       url: "https://dipan.map2u.com.my/server/rest/services/Hosted/Lulc23_Polygon/FeatureServer",
       outFields: ["*"],
       popupEnabled: true,
-      popupTemplate: popuptemplatetest,
+      // popupTemplate: popuptemplatetest,
       visible: false,
     });
 
@@ -1903,14 +1905,33 @@ function TrainingPage() {
         return;
       }
 
-      // Query all polygon features from both layers
-      const [beforeResult, afterResult] = await Promise.all([
-        (beforeFL as FeatureLayer).queryFeatures({ where: '1=1', outFields: ['*'], returnGeometry: true, num: 5000 }),
-        (afterFL as FeatureLayer).queryFeatures({ where: '1=1', outFields: ['*'], returnGeometry: true, num: 5000 }),
-      ]);
+      // Paginate through all features (service maxRecordCount may be < total feature count)
+      const fetchAllFeatures = async (layer: FeatureLayer): Promise<__esri.Graphic[]> => {
+        await layer.load();
+        const pageSize = (layer as any).maxRecordCount || 2000;
+        const totalCount = await layer.queryFeatureCount({ where: '1=1' });
+        const fetchLimit = featureQueryLimit > 0 ? Math.min(featureQueryLimit, totalCount) : totalCount;
+        const allFeatures: __esri.Graphic[] = [];
+        for (let start = 0; start < fetchLimit; start += pageSize) {
+          const result = await layer.queryFeatures({
+            where: '1=1',
+            outFields: ['*'],
+            returnGeometry: true,
+            num: Math.min(pageSize, fetchLimit - start),
+            start,
+            orderByFields: ['objectid'],
+          });
+          allFeatures.push(...result.features);
+          setFeatureChangeProgress(`Fetching ${layer.title}: ${allFeatures.length} / ${fetchLimit}...`);
+        }
+        console.log(`Fetched ${allFeatures.length} / ${totalCount} features from ${layer.title}`);
+        return allFeatures;
+      };
 
-      const beforeFeatures = beforeResult.features;
-      const afterFeatures = afterResult.features;
+      const [beforeFeatures, afterFeatures] = await Promise.all([
+        fetchAllFeatures(beforeFL as FeatureLayer),
+        fetchAllFeatures(afterFL as FeatureLayer),
+      ]);
 
       if (!beforeFeatures.length || !afterFeatures.length) {
         alert('One or both layers returned no features. Check visibility and filters.');
@@ -1919,49 +1940,134 @@ function TrainingPage() {
       }
 
       const field = compareField.trim();
+      
+      // Ensure layers are fully loaded to access domains and types
+      await Promise.all([
+        (beforeFL as FeatureLayer).load(),
+        (afterFL as FeatureLayer).load()
+      ]);
+      
+      // Get field definition and domain for alias lookup (try both layers)
+      let fieldDef = (beforeFL as FeatureLayer).fields.find(f => f.name === field);
+      if (!fieldDef) {
+        fieldDef = (afterFL as FeatureLayer).fields.find(f => f.name === field);
+      }
+      
+      const domain = fieldDef?.domain;
+      const isCodedValueDomain = domain?.type === 'coded-value';
+      
+      // Check for layer types (subtypes) - common in ArcGIS services
+      const layerTypes = (beforeFL as any).types || (afterFL as any).types;
+      const typeIdField = (beforeFL as any).typeIdField || (afterFL as any).typeIdField;
+      const hasTypes = layerTypes && layerTypes.length > 0 && typeIdField === field;
+      
+      console.log('Field:', field);
+      console.log('Field definition:', fieldDef);
+      console.log('Domain:', domain);
+      console.log('Is coded value domain:', isCodedValueDomain);
+      console.log('Layer types:', layerTypes);
+      console.log('Type ID field:', typeIdField);
+      console.log('Has types:', hasTypes);
+      
+      // Helper function to get domain/type alias (description) for a code value
+      const getDomainAlias = (value: any): string => {
+        if (value == null) return 'N/A';
+        
+        // First check layer types (subtypes)
+        if (hasTypes) {
+          const typeInfo = layerTypes.find((t: any) => {
+            return t.id === value || String(t.id) === String(value) || Number(t.id) === Number(value);
+          });
+          if (typeInfo) {
+            // console.log(`Type lookup: ${value} → ${typeInfo.name}`);
+            return typeInfo.name;
+          }
+        }
+        
+        // Fall back to coded-value domain
+        if (isCodedValueDomain) {
+          const codedDomain = domain as __esri.CodedValueDomain;
+          const codedValue = codedDomain.codedValues?.find(cv => {
+            return cv.code === value || String(cv.code) === String(value) || Number(cv.code) === Number(value);
+          });
+          if (codedValue) {
+            console.log(`Domain lookup: ${value} → ${codedValue.name}`);
+            return codedValue.name;
+          }
+        }
+        
+        // No mapping found, return raw value
+        return String(value);
+      };
+      
       const changedFeatures: __esri.Graphic[] = [];
       const changesByType: Record<string, number> = {};
       let totalAreaSqm = 0;
 
-      // For each "after" feature, find intersecting "before" features and check if class changed
-      for (const afterFeat of afterFeatures) {
-        const afterGeom = afterFeat.geometry;
-        if (!afterGeom || afterGeom.type !== 'polygon') continue;
-        const afterVal = afterFeat.attributes?.[field];
+      // Helper: yield to browser so UI stays responsive
+      const yieldToUI = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 
-        for (const beforeFeat of beforeFeatures) {
-          const beforeGeom = beforeFeat.geometry;
-          if (!beforeGeom || beforeGeom.type !== 'polygon') continue;
-          const beforeVal = beforeFeat.attributes?.[field];
+      // Process afterFeatures in chunks to avoid freezing the browser
+      const CHUNK_SIZE = 20;
+      for (let chunkStart = 0; chunkStart < afterFeatures.length; chunkStart += CHUNK_SIZE) {
+        const chunk = afterFeatures.slice(chunkStart, chunkStart + CHUNK_SIZE);
 
-          // Skip if class is same (unchanged)
-          if (String(afterVal) === String(beforeVal)) continue;
+        for (const afterFeat of chunk) {
+          const afterGeom = afterFeat.geometry;
+          if (!afterGeom || afterGeom.type !== 'polygon') continue;
+          const afterVal = afterFeat.attributes?.[field];
 
-          // Compute intersection
-          const intersection = geometryEngine.intersect(afterGeom, beforeGeom);
-          if (!intersection) continue;
+          for (const beforeFeat of beforeFeatures) {
+            const beforeGeom = beforeFeat.geometry;
+            if (!beforeGeom || beforeGeom.type !== 'polygon') continue;
+            const beforeVal = beforeFeat.attributes?.[field];
 
-          // Only keep actual polygon intersections with area > 0
-          const areaSqm = geometryEngine.geodesicArea(intersection as __esri.Polygon, 'square-meters');
-          if (!areaSqm || areaSqm <= 0) continue;
+            // Skip if class is same (unchanged)
+            if (String(afterVal) === String(beforeVal)) continue;
 
-          const changeKey = `${beforeVal} → ${afterVal}`;
-          changesByType[changeKey] = (changesByType[changeKey] || 0) + areaSqm;
-          totalAreaSqm += areaSqm;
-
-          changedFeatures.push({
-            geometry: intersection,
-            attributes: {
-              OBJECTID: changedFeatures.length + 1,
-              change_from: String(beforeVal ?? 'N/A'),
-              change_to: String(afterVal ?? 'N/A'),
-              change_type: changeKey,
-              area_sqm: Math.round(areaSqm * 100) / 100,
-              area_ha: Math.round(areaSqm / 10000 * 10000) / 10000,
+            // Quick bounding-box pre-filter to avoid expensive intersection on non-overlapping polygons
+            const aExt = (afterGeom as __esri.Polygon).extent;
+            const bExt = (beforeGeom as __esri.Polygon).extent;
+            if (aExt && bExt) {
+              if (aExt.xmax < bExt.xmin || aExt.xmin > bExt.xmax ||
+                  aExt.ymax < bExt.ymin || aExt.ymin > bExt.ymax) continue;
             }
-          } as any);
+
+            // Compute intersection
+            const intersection = geometryEngine.intersect(afterGeom, beforeGeom);
+            if (!intersection) continue;
+
+            // Only keep actual polygon intersections with area > 0
+            const areaSqm = geometryEngine.geodesicArea(intersection as __esri.Polygon, 'square-meters');
+            if (!areaSqm || areaSqm <= 0) continue;
+
+            // Get domain aliases for display
+            const beforeAlias = getDomainAlias(beforeVal);
+            const afterAlias = getDomainAlias(afterVal);
+            const changeKey = `${beforeAlias} → ${afterAlias}`;
+            changesByType[changeKey] = (changesByType[changeKey] || 0) + areaSqm;
+            totalAreaSqm += areaSqm;
+
+            changedFeatures.push({
+              geometry: intersection,
+              attributes: {
+                OBJECTID: changedFeatures.length + 1,
+                change_from: beforeAlias,
+                change_to: afterAlias,
+                change_type: changeKey,
+                area_sqm: Math.round(areaSqm * 100) / 100,
+                area_ha: Math.round(areaSqm / 10000 * 10000) / 10000,
+              }
+            } as any);
+          }
         }
+
+        // Yield to browser every chunk to keep UI responsive
+        const pct = Math.round(((chunkStart + CHUNK_SIZE) / afterFeatures.length) * 100);
+        setFeatureChangeProgress(`Processing... ${Math.min(pct, 100)}% (${changedFeatures.length} changes found)`);
+        await yieldToUI();
       }
+      setFeatureChangeProgress('');
 
       if (changedFeatures.length === 0) {
         alert('No changed areas detected.\n\nCheck that:\n• Both layers cover the same area\n• The compare field name is correct\n• The layers use the same coordinate system');
@@ -2049,6 +2155,7 @@ function TrainingPage() {
       alert('Change detection failed. See console for details.');
     } finally {
       setFeatureChangeLoading(false);
+      setFeatureChangeProgress('');
     }
   };
 
@@ -2061,6 +2168,50 @@ function TrainingPage() {
     setFeatureChangeStats(null);
     setBeforeFeatureLayer('');
     setAfterFeatureLayer('');
+  };
+
+  const exportResultToGeoJSON = async () => {
+    const layer = featureChangeResultRef.current;
+    if (!layer) return;
+    try {
+      const result = await layer.queryFeatures({ where: '1=1', outFields: ['*'], returnGeometry: true, num: 10000 });
+      const features = result.features.map(f => {
+        const geom = f.geometry as __esri.Polygon;
+        const sr = geom.spatialReference;
+        const isWebMercator = sr?.wkid === 102100 || sr?.wkid === 3857 || (sr as any)?.latestWkid === 3857;
+
+        // Convert each ring vertex to WGS84 lon/lat
+        const rings = geom.rings.map(ring =>
+          ring.map(([x, y]) => {
+            if (isWebMercator) {
+              const pt = webMercatorUtils.xyToLngLat(x, y);
+              return [Math.round(pt[0] * 1e7) / 1e7, Math.round(pt[1] * 1e7) / 1e7];
+            }
+            // Already geographic (WGS84)
+            return [Math.round(x * 1e7) / 1e7, Math.round(y * 1e7) / 1e7];
+          })
+        );
+        return {
+          type: 'Feature',
+          geometry: { type: 'Polygon', coordinates: rings },
+          properties: { ...f.attributes },
+        };
+      });
+      const geojson = {
+        type: 'FeatureCollection',
+        features,
+      };
+      const blob = new Blob([JSON.stringify(geojson, null, 2)], { type: 'application/geo+json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `change_detection_result_${new Date().toISOString().slice(0, 10)}.geojson`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('GeoJSON export failed:', err);
+      alert('Export failed. See console for details.');
+    }
   };
 
   // When before feature layer changes, load its fields for the compare-field dropdown
@@ -2610,6 +2761,24 @@ function TrainingPage() {
               </select>
 
               <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
+                Feature Fetch Limit (0 = all features):
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '15px' }}>
+                <input
+                  type="number"
+                  min={0}
+                  step={1000}
+                  value={featureQueryLimit}
+                  onChange={(e) => setFeatureQueryLimit(Math.max(0, parseInt(e.target.value) || 0))}
+                  style={{ flex: 1, padding: '8px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+                  disabled={featureChangeActive}
+                />
+                <span style={{ fontSize: '12px', color: '#666', whiteSpace: 'nowrap' }}>
+                  {featureQueryLimit === 0 ? 'Fetch all (slower)' : `~${featureQueryLimit.toLocaleString()} rows`}
+                </span>
+              </div>
+
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
                 Compare Field (e.g. gridcode):
               </label>
               {featureLayerFields.length > 0 ? (
@@ -2644,19 +2813,31 @@ function TrainingPage() {
                     fontSize: '14px', fontWeight: 'bold',
                   }}
                 >
-                  {featureChangeLoading ? '⏳ Analysing...' : '🔍 Detect Changes'}
+                  {featureChangeLoading ? (featureChangeProgress || '⏳ Fetching features...') : '🔍 Detect Changes'}
                 </button>
               ) : (
-                <button
-                  onClick={removeFeatureChangeDetection}
-                  style={{
-                    width: '100%', padding: '10px', backgroundColor: '#d32f2f',
-                    color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer',
-                    fontSize: '14px', fontWeight: 'bold',
-                  }}
-                >
-                  ❌ Remove Result Layer
-                </button>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={exportResultToGeoJSON}
+                    style={{
+                      flex: 1, padding: '10px', backgroundColor: '#0079c1',
+                      color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer',
+                      fontSize: '14px', fontWeight: 'bold',
+                    }}
+                  >
+                    ⬇️ Export GeoJSON
+                  </button>
+                  <button
+                    onClick={removeFeatureChangeDetection}
+                    style={{
+                      flex: 1, padding: '10px', backgroundColor: '#d32f2f',
+                      color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer',
+                      fontSize: '14px', fontWeight: 'bold',
+                    }}
+                  >
+                    ❌ Remove Result Layer
+                  </button>
+                </div>
               )}
 
               {/* Results summary */}
