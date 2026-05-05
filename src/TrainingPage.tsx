@@ -21,6 +21,7 @@ import GeoJSONLayer from "@arcgis/core/layers/GeoJSONLayer";
 import esriRequest from "@arcgis/core/request";
 import SpatialReference from "@arcgis/core/geometry/SpatialReference";
 import * as webMercatorUtils from "@arcgis/core/geometry/support/webMercatorUtils";
+import * as projection from "@arcgis/core/geometry/projection";
 import * as geometryEngine from "@arcgis/core/geometry/geometryEngine";
 // import PortalItem from "@arcgis/core/portal/PortalItem";
 // import Portal from "@arcgis/core/portal/Portal";
@@ -344,11 +345,37 @@ function TrainingPage() {
           zoomButton.style.border = "none";
           zoomButton.style.cursor = "pointer";
 
-          zoomButton.addEventListener("click", function () {
-            if (item.layer && 'fullExtent' in item.layer) {
-              view.goTo((item.layer as any).fullExtent).catch((error: any) => {
-                console.error("Error zooming to layer:", error);
-              });
+          zoomButton.addEventListener("click", async function () {
+            if (!item.layer) return;
+            try {
+              await item.layer.load();
+              let ext: any = null;
+
+              // For FeatureLayers, queryExtent() is more reliable than fullExtent
+              // especially for source-based (uploaded) layers
+              if (typeof (item.layer as any).queryExtent === "function") {
+                try {
+                  const result = await (item.layer as any).queryExtent();
+                  if (result?.extent) ext = result.extent;
+                } catch { /* fall through to fullExtent */ }
+              }
+
+              // Fallback to fullExtent
+              if (!ext) ext = (item.layer as any).fullExtent;
+
+              const isValid = (e: any) =>
+                e &&
+                isFinite(e.xmin) && isFinite(e.xmax) &&
+                isFinite(e.ymin) && isFinite(e.ymax) &&
+                e.xmin !== e.xmax && e.ymin !== e.ymax;
+
+              if (isValid(ext)) {
+                await view.goTo(ext);
+              } else {
+                alert("This layer does not have a valid extent to zoom to.");
+              }
+            } catch (error: any) {
+              console.error("Error zooming to layer:", error);
             }
           });
 
@@ -1053,50 +1080,98 @@ function TrainingPage() {
         } else if (filename.endsWith(".zip")) {
           const formData = new FormData();
           formData.append("file", file);
+
           const publishParameters = {
             name: file.name.replace(".zip", ""),
-            targetSR: SpatialReference.WebMercator,
+            targetSR: { wkid: 4326 },
             maxRecordCount: 1000,
             enforceInputFileSizeLimit: true,
             enforceOutputJsonSizeLimit: true,
           };
+
           try {
-            const response = await esriRequest("https://www.arcgis.com/sharing/rest/content/features/generate", {
-              method: "post",
-              query: { filetype: "shapefile", publishParameters: JSON.stringify(publishParameters), f: "json" },
-              body: formData,
-              responseType: "json",
-            });
+            const response = await esriRequest(
+              "https://www.arcgis.com/sharing/rest/content/features/generate",
+              {
+                method: "post",
+                query: {
+                  filetype: "shapefile",
+                  publishParameters: JSON.stringify(publishParameters),
+                  f: "json",
+                },
+                body: formData,
+                responseType: "json",
+              }
+            );
+
             const layerData = response.data.featureCollection?.layers?.[0];
             if (!layerData) throw new Error("No layer found in uploaded shapefile.");
 
+            // Ensure OBJECTID
             const objectIdField = "OBJECTID";
-            const hasOID = layerData.layerDefinition.fields.some((f: any) => f.type === "oid" || f.name === objectIdField);
+            const hasOID = layerData.layerDefinition.fields.some(
+              (f: any) => f.type === "oid" || f.name === objectIdField
+            );
             if (!hasOID) {
-              layerData.layerDefinition.fields.push({ name: objectIdField, alias: objectIdField, type: "oid" });
-              layerData.featureSet.features.forEach((f: any, i: number) => { f.attributes[objectIdField] = i + 1; });
+              layerData.layerDefinition.fields.push({
+                name: objectIdField,
+                alias: objectIdField,
+                type: "oid",
+              });
+              layerData.featureSet.features.forEach((f: any, i: number) => {
+                f.attributes[objectIdField] = i + 1;
+              });
               layerData.layerDefinition.objectIdField = objectIdField;
             }
-            layerData.layerDefinition.fields = layerData.layerDefinition.fields.map((f: any) => ({ ...f, type: normalizeFieldType(f.type) }));
-            layerData.layerDefinition.geometryType = normalizeGeometryType(layerData.layerDefinition.geometryType);
 
-            const targetSR = new SpatialReference({ wkid: 102100 });
+            // Normalize field types
+            layerData.layerDefinition.fields = layerData.layerDefinition.fields.map((f: any) => ({
+              ...f,
+              type: normalizeFieldType(f.type),
+            }));
+            // Fix geometryType for FeatureLayer
+            layerData.layerDefinition.geometryType = normalizeGeometryType(
+              layerData.layerDefinition.geometryType
+            );
+
+            // Geometries from the generate endpoint are already in WGS84 (4326)
+            // Just inject the geometry type string required by the ArcGIS JS API
             layerData.featureSet.features = layerData.featureSet.features.map((f: any) => {
-              const projected = webMercatorUtils.geographicToWebMercator(f.geometry) as any;
-              return { ...f, geometry: { ...projected, type: getGeometryTypeFromLayer(layerData.layerDefinition.geometryType) } };
+              f.geometry = {
+                ...f.geometry,
+                type: getGeometryTypeFromLayer(layerData.layerDefinition.geometryType),
+              };
+              return f;
             });
-            // targetSR is used for the layer's spatial reference
-            void targetSR;
 
             const randomColor = generateRandomColor();
             const geometryType = layerData.layerDefinition.geometryType;
             let renderer: any;
+
             if (geometryType === "point") {
-              renderer = { type: "simple", symbol: { type: "simple-marker", color: randomColor, size: 8, outline: { color: [255, 255, 255, 0.8], width: 1 } } };
+              renderer = {
+                type: "simple",
+                symbol: {
+                  type: "simple-marker",
+                  color: randomColor,
+                  size: 8,
+                  outline: { color: [255, 255, 255, 0.8], width: 1 },
+                },
+              };
             } else if (geometryType === "polyline") {
-              renderer = { type: "simple", symbol: { type: "simple-line", color: randomColor, width: 2 } };
+              renderer = {
+                type: "simple",
+                symbol: { type: "simple-line", color: randomColor, width: 2 },
+              };
             } else if (geometryType === "polygon") {
-              renderer = { type: "simple", symbol: { type: "simple-fill", color: randomColor, outline: { color: [255, 255, 255, 0.8], width: 1 } } };
+              renderer = {
+                type: "simple",
+                symbol: {
+                  type: "simple-fill",
+                  color: randomColor,
+                  outline: { color: [255, 255, 255, 0.8], width: 1 },
+                },
+              };
             }
 
             const shapefileLayer = new FeatureLayer({
@@ -1104,17 +1179,24 @@ function TrainingPage() {
               fields: layerData.layerDefinition.fields,
               objectIdField: layerData.layerDefinition.objectIdField,
               geometryType: layerData.layerDefinition.geometryType,
-              spatialReference: SpatialReference.WebMercator,
+              spatialReference: { wkid: 4326 },
               title: file.name.replace(".zip", ""),
               renderer: renderer as any,
             });
+
             map.add(shapefileLayer);
             tempUserLayers.push(shapefileLayer);
             updateAddLayerListUI();
             alert("✅ Shapefile loaded successfully.");
-          } catch (err: any) {
-            console.error("❌ Shapefile upload failed:", err);
-            alert(`❌ Failed to upload shapefile.\n\n${err?.message || "Unknown error"}`);
+          } catch (error: any) {
+            console.error("❌ Upload failed:", error);
+            const isHTML =
+              typeof error?.response?.data === "string" &&
+              error.response.data.startsWith("<!DOCTYPE");
+            const message = isHTML
+              ? "Server returned HTML (check CORS or authentication)."
+              : error?.message || "Unknown error uploading shapefile.";
+            alert(`❌ Failed to upload shapefile.\n\n${message}`);
           }
         } else {
           alert("❌ Unsupported file format. Use .geojson, .json, .csv, or .zip");
