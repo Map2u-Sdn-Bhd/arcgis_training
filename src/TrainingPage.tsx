@@ -1259,7 +1259,7 @@ function TrainingPage() {
         // renderer: testrenderer,
         customParameters: {
           token:
-            'SaTyX6UXtUV8e6-cZRz_4jzbB_6LrE9t8bP2QvX3eGL0yc3levdKmbn4KHs2x9H0WdISMQPB_EQY-yjEsYkNSXP2Bfkr2DaJkORATe3J-RNRGvcbVCy8vqstXkKAnfkwZ-kqkSxaN6Ludsh2WJUVBPEim9WYXOWlRqJdiFUfgbz0VZak9lXc3opbqmJPm4FB',
+            '5eV-z95_E6K_OoH4Gp7pry_ATI5MrDzciKAuArDn94uTrTRFwuNui21tzhkMYqQlH6q9FkVRyCKZPc_EvBXOTRJRbH7qrMmRntc8f-j18XnEU1ym_DwNyBJZHWwVJ0DRgThxxNl2wMZeHGaNSNgcI0fNNIYenGdJseE78-spW5pgEHflQS4sygj_NHUCddux',
         },
         popupTemplate: {
           title: title,
@@ -1279,30 +1279,38 @@ function TrainingPage() {
 
     // Collect available imagery layers for change detection
     view.when(() => {
-      const layers: LayerInfo[] = [];
-      const fLayers: LayerInfo[] = [];
-      map.allLayers.forEach((layer: __esri.Layer) => {
-        if (layer.type === 'imagery' || layer.type === 'imagery-tile' || layer.type === 'tile' || layer.type === 'map-image') {
-          layers.push({
-            id: layer.id,
-            title: layer.title || 'Untitled Layer',
-            url: (layer as any).url,
-            type: layer.type
-          });
-        }
-        if (layer.type === 'feature') {
-          fLayers.push({
-            id: layer.id,
-            title: layer.title || 'Untitled Layer',
-            url: (layer as any).url,
-            type: layer.type
-          });
-        }
-      });
-      setAvailableLayers(layers);
-      setFeatureAvailableLayers(fLayers);
-      console.log('Available layers for change detection:', layers);
-      console.log('Available feature layers:', fLayers);
+      const updateAvailableLayers = () => {
+        const layers: LayerInfo[] = [];
+        const fLayers: LayerInfo[] = [];
+        map.allLayers.forEach((layer: __esri.Layer) => {
+          if (layer.type === 'imagery' || layer.type === 'imagery-tile' || layer.type === 'tile' || layer.type === 'map-image') {
+            layers.push({
+              id: layer.id,
+              title: layer.title || 'Untitled Layer',
+              url: (layer as any).url,
+              type: layer.type
+            });
+          }
+          if (layer.type === 'feature') {
+            fLayers.push({
+              id: layer.id,
+              title: layer.title || 'Untitled Layer',
+              url: (layer as any).url,
+              type: layer.type
+            });
+          }
+        });
+        setAvailableLayers(layers);
+        setFeatureAvailableLayers(fLayers);
+        console.log('Available layers for change detection:', layers);
+        console.log('Available feature layers:', fLayers);
+      };
+
+      // Initial update
+      updateAvailableLayers();
+
+      // Listen for layer changes and auto-refresh
+      map.allLayers.on('change', updateAvailableLayers);
     });
 
     if (view.popup) {
@@ -1864,7 +1872,7 @@ function TrainingPage() {
           opacity: 0.5,
           blendMode: 'difference',
           customParameters: {
-            token: 'SaTyX6UXtUV8e6-cZRz_4jzbB_6LrE9t8bP2QvX3eGL0yc3levdKmbn4KHs2x9H0WdISMQPB_EQY-yjEsYkNSXP2Bfkr2DaJkORATe3J-RNRGvcbVCy8vqstXkKAnfkwZ-kqkSxaN6Ludsh2WJUVBPEim9WYXOWlRqJdiFUfgbz0VZak9lXc3opbqmJPm4FB',
+            token: '5eV-z95_E6K_OoH4Gp7pry_ATI5MrDzciKAuArDn94uTrTRFwuNui21tzhkMYqQlH6q9FkVRyCKZPc_EvBXOTRJRbH7qrMmRntc8f-j18XnEU1ym_DwNyBJZHWwVJ0DRgThxxNl2wMZeHGaNSNgcI0fNNIYenGdJseE78-spW5pgEHflQS4sygj_NHUCddux',
           }
         });
 
@@ -1883,7 +1891,7 @@ function TrainingPage() {
         title: `Change Detection (${detectionMethod})`,
         opacity: 0.85,
         customParameters: {
-          token: 'SaTyX6UXtUV8e6-cZRz_4jzbB_6LrE9t8bP2QvX3eGL0yc3levdKmbn4KHs2x9H0WdISMQPB_EQY-yjEsYkNSXP2Bfkr2DaJkORATe3J-RNRGvcbVCy8vqstXkKAnfkwZ-kqkSxaN6Ludsh2WJUVBPEim9WYXOWlRqJdiFUfgbz0VZak9lXc3opbqmJPm4FB',
+          token: '5eV-z95_E6K_OoH4Gp7pry_ATI5MrDzciKAuArDn94uTrTRFwuNui21tzhkMYqQlH6q9FkVRyCKZPc_EvBXOTRJRbH7qrMmRntc8f-j18XnEU1ym_DwNyBJZHWwVJ0DRgThxxNl2wMZeHGaNSNgcI0fNNIYenGdJseE78-spW5pgEHflQS4sygj_NHUCddux',
           renderingRule: JSON.stringify(renderingRuleJson)
         }
       } as any);
@@ -2352,6 +2360,37 @@ function TrainingPage() {
     setSwipeActive(false);
   };
 
+  // Refresh available layers for change detection
+  const refreshAvailableLayers = () => {
+    if (!viewRef.current) return;
+    const map = viewRef.current.map as __esri.Map;
+    if (!map) return;
+
+    const layers: LayerInfo[] = [];
+    const fLayers: LayerInfo[] = [];
+    map.allLayers.forEach((layer: __esri.Layer) => {
+      if (layer.type === 'imagery' || layer.type === 'imagery-tile' || layer.type === 'tile' || layer.type === 'map-image') {
+        layers.push({
+          id: layer.id,
+          title: layer.title || 'Untitled Layer',
+          url: (layer as any).url,
+          type: layer.type
+        });
+      }
+      if (layer.type === 'feature') {
+        fLayers.push({
+          id: layer.id,
+          title: layer.title || 'Untitled Layer',
+          url: (layer as any).url,
+          type: layer.type
+        });
+      }
+    });
+    setAvailableLayers(layers);
+    setFeatureAvailableLayers(fLayers);
+    console.log('Refreshed available layers:', layers.length, 'imagery/tile layers,', fLayers.length, 'feature layers');
+  };
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '98vh' }}>
       <div ref={mapDiv} style={{ width: '100%', height: '100%' }}></div>
@@ -2393,7 +2432,26 @@ function TrainingPage() {
           overflowY: 'auto'
         }}>
           <div style={{ padding: '15px', borderBottom: '2px solid #0079c1' }}>
-            <h3 style={{ margin: '0 0 5px 0', color: '#0079c1' }}>Change Detection</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '5px' }}>
+              <h3 style={{ margin: '0', color: '#0079c1' }}>Change Detection</h3>
+              <button
+                onClick={refreshAvailableLayers}
+                title="Refresh layer list"
+                style={{
+                  padding: '4px 10px',
+                  backgroundColor: '#28a745',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                  fontWeight: 'bold',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                }}
+              >
+                🔄 Refresh Layers
+              </button>
+            </div>
             <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#666' }}>
               Detect changes between two layers using raster functions or blend mode
             </p>
