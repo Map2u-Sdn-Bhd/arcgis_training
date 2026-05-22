@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import "@arcgis/core/assets/esri/themes/light/main.css";
 import MapView from "@arcgis/core/views/MapView";
 import Map from "@arcgis/core/Map";
@@ -68,7 +69,7 @@ function TrainingPage() {
   const cdBlobUrlRef = useRef<string | null>(null);
 
   // ── Feature-layer (polygon) change detection state ──
-  const [cdMode, setCdMode] = useState<'raster' | 'feature'>('raster');
+  // cdMode removed — raster panel is always shown; feature layer CD moved to Expand widget
   const [featureAvailableLayers, setFeatureAvailableLayers] = useState<LayerInfo[]>([]);
   const [beforeFeatureLayer, setBeforeFeatureLayer] = useState<string>('');
   const [afterFeatureLayer, setAfterFeatureLayer] = useState<string>('');
@@ -84,6 +85,10 @@ function TrainingPage() {
     featureCount: number;
   } | null>(null);
   const featureChangeResultRef = useRef<FeatureLayer | null>(null);
+
+  // ── Feature Layer CD Expand Widget ──
+  const featureCDContainerRef = useRef<HTMLDivElement | null>(null);
+  const [featureCDWidgetReady, setFeatureCDWidgetReady] = useState(false);
 
   // ── Swipe widget state ──
   const [showSwipePanel, setShowSwipePanel] = useState<boolean>(false);
@@ -219,24 +224,24 @@ function TrainingPage() {
       visible: false,
     });
 
-    const lulc2021ImageryLayer = new ImageryLayer({
-      url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/Lulc2021/ImageServer",
-      title: "LULC 2021 Imagery",
-      visible: false,
-    });
+    // const lulc2021ImageryLayer = new ImageryLayer({
+    //   url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/Lulc2021/ImageServer",
+    //   title: "LULC 2021 Imagery",
+    //   visible: false,
+    // });
 
-    const lulc2023ImageryLayer = new ImageryLayer({
-      url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/Lulc2023/ImageServer",
-      title: "LULC 2023 Imagery",
-      visible: false,
-    });
+    // const lulc2023ImageryLayer = new ImageryLayer({
+    //   url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/Lulc2023/ImageServer",
+    //   title: "LULC 2023 Imagery",
+    //   visible: false,
+    // });
 
-    
+
 
     map.add(lulc23NdviLayer);
     map.add(lulc21NdviLayer);
     map.add(reclassNdviCdLayer);
-    
+
 
     map.add(featureLayer);
     map.add(featureLayer2);
@@ -249,8 +254,8 @@ function TrainingPage() {
     map.add(lulc21PolygonLayer);
     map.add(lulc23PolygonLayer);
 
-    map.add(lulc2021ImageryLayer);
-    map.add(lulc2023ImageryLayer);
+    // map.add(lulc2021ImageryLayer);
+    // map.add(lulc2023ImageryLayer);
 
 
     // const imageryLayer = new ImageryLayer({
@@ -1215,6 +1220,21 @@ function TrainingPage() {
     });
     view.ui.add(addLayerExpand, "top-left");
 
+    // ── Feature Layer Change Detection Expand Widget ──
+    const featureCDDiv = document.createElement("div");
+    featureCDDiv.style.backgroundColor = "white";
+    featureCDContainerRef.current = featureCDDiv;
+
+    const featureCDExpand = new Expand({
+      view: view,
+      content: featureCDDiv,
+      expandTooltip: "Feature Layer Change Detection",
+      expandIcon: "analysis",
+      collapseTooltip: "Close Feature Layer Change Detection",
+    });
+    view.ui.add(featureCDExpand, "top-right");
+    setFeatureCDWidgetReady(true);
+
     const dsmLayers = [
       {
         url: "https://mygeoserve5.jupem.gov.my/imageserver/rest/services/PRODUCTION_ELEVATION_DSM/PROD_DSM_MY701T_2008/ImageServer",
@@ -1420,7 +1440,7 @@ function TrainingPage() {
 
     try {
       if (!map) return;
-      
+
       // Get the selected layers
       const beforeLayerObj = map.allLayers.find(l => l.id === beforeLayer);
       const afterLayerObj = map.allLayers.find(l => l.id === afterLayer);
@@ -1468,13 +1488,13 @@ function TrainingPage() {
         changeDetectionLayerRef.current = blendLayer as any;
         map.add(blendLayer);
         setChangeDetectionActive(true);
-        
+
         const modeDesc = tileBlendMode === 'difference' ? 'Dark = no change, Bright = changed' :
-                        tileBlendMode === 'multiply' ? 'Keeps darker areas (highlights removal)' :
-                        tileBlendMode === 'screen' ? 'Keeps brighter areas (highlights addition)' :
-                        tileBlendMode === 'overlay' ? 'Enhanced contrast for changes' :
-                        'Mutual exclusion highlighting';
-        
+          tileBlendMode === 'multiply' ? 'Keeps darker areas (highlights removal)' :
+            tileBlendMode === 'screen' ? 'Keeps brighter areas (highlights addition)' :
+              tileBlendMode === 'overlay' ? 'Enhanced contrast for changes' :
+                'Mutual exclusion highlighting';
+
         alert(`TileLayer change detection created!\n\nBlend Mode: ${tileBlendMode}\n${modeDesc}\n\n${hideDarkAreas ? '✓ Dark areas enhanced for visibility' : ''}`);
         return;
       }
@@ -1533,11 +1553,11 @@ function TrainingPage() {
           const outputImageData = outCtx.createImageData(snapW, snapH);
           const alpha = Math.round(changeOpacity * 255);
           for (let i = 0; i < afterData.length; i += 4) {
-            const dr = Math.abs(afterData[i]     - beforeData[i]);
+            const dr = Math.abs(afterData[i] - beforeData[i]);
             const dg = Math.abs(afterData[i + 1] - beforeData[i + 1]);
             const db = Math.abs(afterData[i + 2] - beforeData[i + 2]);
             if ((dr + dg + db) / 3 >= changeThreshold) {
-              outputImageData.data[i]     = afterData[i];
+              outputImageData.data[i] = afterData[i];
               outputImageData.data[i + 1] = afterData[i + 1];
               outputImageData.data[i + 2] = afterData[i + 2];
               outputImageData.data[i + 3] = alpha;
@@ -1611,10 +1631,10 @@ function TrainingPage() {
           (() => {
             const blendLegendDescs: Record<string, string> = {
               difference: 'Black / dark = no change · Bright / colourful = area changed',
-              exclusion:  'Black / dark = no change · Bright = changed area',
-              multiply:   'Dark = overlap / no change · Light = area removed',
-              screen:     'Dark = area added · Light = overlap / no change',
-              overlay:    'Mid-grey = unchanged · Bright or dark = changed',
+              exclusion: 'Black / dark = no change · Bright = changed area',
+              multiply: 'Dark = overlap / no change · Light = area removed',
+              screen: 'Dark = area added · Light = overlap / no change',
+              overlay: 'Mid-grey = unchanged · Bright or dark = changed',
               'hard-light': 'Mid-grey = unchanged · Bright or dark = changed',
             };
             setCdLegend({
@@ -1675,7 +1695,7 @@ function TrainingPage() {
               const aAvg = (afterData[i] + afterData[i + 1] + afterData[i + 2]) / 3;
               return Math.min(255, Math.abs((aAvg / bAvg - 1) * 255));
             }
-            const dr = Math.abs(afterData[i]     - beforeData[i]);
+            const dr = Math.abs(afterData[i] - beforeData[i]);
             const dg = Math.abs(afterData[i + 1] - beforeData[i + 1]);
             const db = Math.abs(afterData[i + 2] - beforeData[i + 2]);
             return (dr + dg + db) / 3;
@@ -1690,8 +1710,8 @@ function TrainingPage() {
             if (d > maxObservedDelta) maxObservedDelta = d;
           }
           const autoRange = maxObservedDelta - threshold || 1;
-          const lowBreak  = threshold + autoRange * 0.33; // lower third  → green
-          const midBreak  = threshold + autoRange * 0.67; // middle third → yellow
+          const lowBreak = threshold + autoRange * 0.33; // lower third  → green
+          const midBreak = threshold + autoRange * 0.67; // middle third → yellow
           //                                               // upper third  → red
 
           // Pass 2: classify and paint
@@ -1703,13 +1723,13 @@ function TrainingPage() {
             // Hard discrete classes — breakpoints scale to observed data range
             let r: number, g: number, b: number;
             if (delta < lowBreak) {
-              r = 0;   g = 200; b = 0;   // green  — low change
+              r = 0; g = 200; b = 0;   // green  — low change
             } else if (delta < midBreak) {
               r = 255; g = 180; b = 0;   // yellow — moderate change
             } else {
-              r = 220; g = 0;   b = 0;   // red    — high change
+              r = 220; g = 0; b = 0;   // red    — high change
             }
-            outputImageData.data[i]     = r;
+            outputImageData.data[i] = r;
             outputImageData.data[i + 1] = g;
             outputImageData.data[i + 2] = b;
             outputImageData.data[i + 3] = 255; // full opacity — no semi-transparent bleed
@@ -1895,7 +1915,7 @@ function TrainingPage() {
           renderingRule: JSON.stringify(renderingRuleJson)
         }
       } as any);
-      
+
       // Set rendering rule after creation
       (changeLayer as any).renderingRule = renderingRuleJson;
 
@@ -1931,7 +1951,7 @@ function TrainingPage() {
       }
     } catch (error) {
       console.error('Error creating change detection layer:', error);
-      const errorMsg = isImageryLayer 
+      const errorMsg = isImageryLayer
         ? 'Error creating change detection layer.\n\n✅ TIP: If you\'re using ImageryLayers, try enabling "Use Blend Mode for ImageLayers (simpler)" checkbox. Blend mode is more compatible and doesn\'t require server-side raster function support.'
         : 'Error creating change detection layer. Please ensure both layers are imagery layers with valid URLs.';
       alert(errorMsg);
@@ -2030,27 +2050,27 @@ function TrainingPage() {
       }
 
       const field = compareField.trim();
-      
+
       // Ensure layers are fully loaded to access domains and types
       await Promise.all([
         (beforeFL as FeatureLayer).load(),
         (afterFL as FeatureLayer).load()
       ]);
-      
+
       // Get field definition and domain for alias lookup (try both layers)
       let fieldDef = (beforeFL as FeatureLayer).fields.find(f => f.name === field);
       if (!fieldDef) {
         fieldDef = (afterFL as FeatureLayer).fields.find(f => f.name === field);
       }
-      
+
       const domain = fieldDef?.domain;
       const isCodedValueDomain = domain?.type === 'coded-value';
-      
+
       // Check for layer types (subtypes) - common in ArcGIS services
       const layerTypes = (beforeFL as any).types || (afterFL as any).types;
       const typeIdField = (beforeFL as any).typeIdField || (afterFL as any).typeIdField;
       const hasTypes = layerTypes && layerTypes.length > 0 && typeIdField === field;
-      
+
       console.log('Field:', field);
       console.log('Field definition:', fieldDef);
       console.log('Domain:', domain);
@@ -2058,11 +2078,11 @@ function TrainingPage() {
       console.log('Layer types:', layerTypes);
       console.log('Type ID field:', typeIdField);
       console.log('Has types:', hasTypes);
-      
+
       // Helper function to get domain/type alias (description) for a code value
       const getDomainAlias = (value: any): string => {
         if (value == null) return 'N/A';
-        
+
         // First check layer types (subtypes)
         if (hasTypes) {
           const typeInfo = layerTypes.find((t: any) => {
@@ -2073,7 +2093,7 @@ function TrainingPage() {
             return typeInfo.name;
           }
         }
-        
+
         // Fall back to coded-value domain
         if (isCodedValueDomain) {
           const codedDomain = domain as __esri.CodedValueDomain;
@@ -2085,11 +2105,11 @@ function TrainingPage() {
             return codedValue.name;
           }
         }
-        
+
         // No mapping found, return raw value
         return String(value);
       };
-      
+
       const changedFeatures: __esri.Graphic[] = [];
       const changesByType: Record<string, number> = {};
       let totalAreaSqm = 0;
@@ -2120,7 +2140,7 @@ function TrainingPage() {
             const bExt = (beforeGeom as __esri.Polygon).extent;
             if (aExt && bExt) {
               if (aExt.xmax < bExt.xmin || aExt.xmin > bExt.xmax ||
-                  aExt.ymax < bExt.ymin || aExt.ymin > bExt.ymax) continue;
+                aExt.ymax < bExt.ymin || aExt.ymin > bExt.ymax) continue;
             }
 
             // Compute intersection
@@ -2453,37 +2473,11 @@ function TrainingPage() {
               </button>
             </div>
             <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#666' }}>
-              Detect changes between two layers using raster functions or blend mode
+              Detect changes between two raster / tile layers
             </p>
-            {/* Mode tabs */}
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button
-                onClick={() => setCdMode('raster')}
-                style={{
-                  flex: 1, padding: '6px', fontSize: '12px', fontWeight: 'bold',
-                  borderRadius: '4px', border: 'none', cursor: 'pointer',
-                  backgroundColor: cdMode === 'raster' ? '#0079c1' : '#e0e0e0',
-                  color: cdMode === 'raster' ? 'white' : '#333',
-                }}
-              >
-                🖼️ Raster / Tile
-              </button>
-              <button
-                onClick={() => setCdMode('feature')}
-                style={{
-                  flex: 1, padding: '6px', fontSize: '12px', fontWeight: 'bold',
-                  borderRadius: '4px', border: 'none', cursor: 'pointer',
-                  backgroundColor: cdMode === 'feature' ? '#0079c1' : '#e0e0e0',
-                  color: cdMode === 'feature' ? 'white' : '#333',
-                }}
-              >
-                🗺️ Feature Layer
-              </button>
-            </div>
           </div>
 
           <div style={{ padding: '15px' }}>
-            {cdMode === 'raster' && (<>
             <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
               Before Layer (Time 1):
             </label>
@@ -2565,17 +2559,17 @@ function TrainingPage() {
             </div>
 
             {/* TileLayer-specific options */}
-            <div style={{ 
-              marginBottom: '15px', 
-              padding: '10px', 
-              backgroundColor: '#f9f9f9', 
+            <div style={{
+              marginBottom: '15px',
+              padding: '10px',
+              backgroundColor: '#f9f9f9',
               borderRadius: '4px',
               border: '1px solid #e0e0e0'
             }}>
               <p style={{ margin: '0 0 10px 0', fontSize: '13px', fontWeight: 'bold', color: '#0079c1' }}>
                 🎨 TileLayer Options
               </p>
-              
+
               <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '13px' }}>
                 Blend Mode:
               </label>
@@ -2866,165 +2860,6 @@ function TrainingPage() {
                 </p>
               </div>
             )}
-            </>)}
-
-            {/* ── Feature Layer Change Detection UI ── */}
-            {cdMode === 'feature' && (<>
-              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
-                Before Feature Layer (Time 1):
-              </label>
-              <select
-                value={beforeFeatureLayer}
-                onChange={(e) => { setBeforeFeatureLayer(e.target.value); loadFeatureLayerFields(e.target.value); }}
-                style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
-                disabled={featureChangeActive}
-              >
-                <option value="">Select a polygon feature layer...</option>
-                {featureAvailableLayers.map(layer => (
-                  <option key={layer.id} value={layer.id}>{layer.title}</option>
-                ))}
-              </select>
-
-              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
-                After Feature Layer (Time 2):
-              </label>
-              <select
-                value={afterFeatureLayer}
-                onChange={(e) => setAfterFeatureLayer(e.target.value)}
-                style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
-                disabled={featureChangeActive}
-              >
-                <option value="">Select a polygon feature layer...</option>
-                {featureAvailableLayers.map(layer => (
-                  <option key={layer.id} value={layer.id}>{layer.title}</option>
-                ))}
-              </select>
-
-              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
-                Feature Fetch Limit (0 = all features):
-              </label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '15px' }}>
-                <input
-                  type="number"
-                  min={0}
-                  step={1000}
-                  value={featureQueryLimit}
-                  onChange={(e) => setFeatureQueryLimit(Math.max(0, parseInt(e.target.value) || 0))}
-                  style={{ flex: 1, padding: '8px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
-                  disabled={featureChangeActive}
-                />
-                <span style={{ fontSize: '12px', color: '#666', whiteSpace: 'nowrap' }}>
-                  {featureQueryLimit === 0 ? 'Fetch all (slower)' : `~${featureQueryLimit.toLocaleString()} rows`}
-                </span>
-              </div>
-
-              <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
-                Compare Field (e.g. gridcode):
-              </label>
-              {featureLayerFields.length > 0 ? (
-                <select
-                  value={compareField}
-                  onChange={(e) => setCompareField(e.target.value)}
-                  style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
-                  disabled={featureChangeActive}
-                >
-                  {featureLayerFields.map(f => <option key={f} value={f}>{f}</option>)}
-                </select>
-              ) : (
-                <input
-                  type="text"
-                  value={compareField}
-                  onChange={(e) => setCompareField(e.target.value)}
-                  placeholder="e.g. gridcode"
-                  style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px', boxSizing: 'border-box' }}
-                  disabled={featureChangeActive}
-                />
-              )}
-
-              {!featureChangeActive ? (
-                <button
-                  onClick={runFeatureLayerChangeDetection}
-                  disabled={!beforeFeatureLayer || !afterFeatureLayer || featureChangeLoading}
-                  style={{
-                    width: '100%', padding: '10px',
-                    backgroundColor: beforeFeatureLayer && afterFeatureLayer ? '#28a745' : '#ccc',
-                    color: 'white', border: 'none', borderRadius: '4px',
-                    cursor: beforeFeatureLayer && afterFeatureLayer ? 'pointer' : 'not-allowed',
-                    fontSize: '14px', fontWeight: 'bold',
-                  }}
-                >
-                  {featureChangeLoading ? (featureChangeProgress || '⏳ Fetching features...') : '🔍 Detect Changes'}
-                </button>
-              ) : (
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button
-                    onClick={exportResultToGeoJSON}
-                    style={{
-                      flex: 1, padding: '10px', backgroundColor: '#0079c1',
-                      color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer',
-                      fontSize: '14px', fontWeight: 'bold',
-                    }}
-                  >
-                    ⬇️ Export GeoJSON
-                  </button>
-                  <button
-                    onClick={removeFeatureChangeDetection}
-                    style={{
-                      flex: 1, padding: '10px', backgroundColor: '#d32f2f',
-                      color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer',
-                      fontSize: '14px', fontWeight: 'bold',
-                    }}
-                  >
-                    ❌ Remove Result Layer
-                  </button>
-                </div>
-              )}
-
-              {/* Results summary */}
-              {featureChangeStats && (
-                <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#f0fff4', borderRadius: '4px', borderLeft: '4px solid #28a745' }}>
-                  <p style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 'bold', color: '#155724' }}>
-                    ✅ Change Detection Results
-                  </p>
-                  <p style={{ margin: '0 0 4px 0', fontSize: '12px' }}>
-                    <strong>Changed polygons:</strong> {featureChangeStats.featureCount.toLocaleString()}
-                  </p>
-                  <p style={{ margin: '0 0 8px 0', fontSize: '12px' }}>
-                    <strong>Total changed area:</strong> {featureChangeStats.totalArea.toLocaleString()} m²
-                    &nbsp;({(featureChangeStats.totalArea / 10000).toFixed(2)} ha)
-                  </p>
-                  <p style={{ margin: '0 0 4px 0', fontSize: '12px', fontWeight: 'bold' }}>By change type:</p>
-                  <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
-                    {Object.entries(featureChangeStats.changesByType).map(([type, area]) => (
-                      <div key={type} style={{ fontSize: '11px', padding: '3px 0', borderBottom: '1px solid #d4edda' }}>
-                        <strong>{type}:</strong>&nbsp;
-                        {area.toLocaleString()} m² ({(area / 10000).toFixed(4)} ha)
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#f0f8ff', borderRadius: '4px', borderLeft: '4px solid #0079c1' }}>
-                <p style={{ margin: '0 0 6px 0', fontSize: '13px', fontWeight: 'bold' }}>📌 How it works:</p>
-                <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '12px', lineHeight: '1.6' }}>
-                  <li>Select two polygon FeatureLayers (e.g. from Raster-to-Polygon result)</li>
-                  <li>Choose the field that holds the class value (e.g. <code>gridcode</code>)</li>
-                  <li>Unchanged areas (same class) are <strong>removed</strong></li>
-                  <li>Changed areas are intersected and shown in a new result layer</li>
-                  <li>Area (m² and ha) is calculated for each change type</li>
-                  <li>Click a polygon on the map to see change details in the popup</li>
-                </ul>
-              </div>
-
-              {featureAvailableLayers.length === 0 && (
-                <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#fff3cd', borderRadius: '4px', borderLeft: '4px solid #ffc107' }}>
-                  <p style={{ margin: 0, fontSize: '12px', color: '#856404' }}>
-                    ⚠️ No FeatureLayers found on the map. Add your Raster-to-Polygon result layers first.
-                  </p>
-                </div>
-              )}
-            </>)}
           </div>
         </div>
       )}
@@ -3129,6 +2964,173 @@ function TrainingPage() {
             &#9432; Both selected layers will be made visible. Drag the handle to compare.
           </p>
         </div>
+      )}
+
+      {/* ── Feature Layer Change Detection – Expand Widget Portal ── */}
+      {featureCDWidgetReady && featureCDContainerRef.current && createPortal(
+        <div style={{ padding: '15px', width: '360px', maxHeight: 'calc(100vh - 200px)', overflowY: 'auto', backgroundColor: 'white' }}>
+          {/* Header */}
+          <div style={{ paddingBottom: '10px', marginBottom: '15px', borderBottom: '2px solid #2196f3' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
+              <h3 style={{ margin: '0', color: '#2196f3' }}>🗺️ Feature Layer Change Detection</h3>
+              <button
+                onClick={refreshAvailableLayers}
+                title="Refresh layer list"
+                style={{ padding: '4px 10px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 'bold' }}
+              >
+                🔄 Refresh
+              </button>
+            </div>
+            <p style={{ margin: 0, fontSize: '12px', color: '#666' }}>
+              Detect changes between two polygon feature layers
+            </p>
+          </div>
+
+          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
+            Before Feature Layer (Time 1):
+          </label>
+          <select
+            value={beforeFeatureLayer}
+            onChange={(e) => { setBeforeFeatureLayer(e.target.value); loadFeatureLayerFields(e.target.value); }}
+            style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+            disabled={featureChangeActive}
+          >
+            <option value="">Select a polygon feature layer...</option>
+            {featureAvailableLayers.map(layer => (
+              <option key={layer.id} value={layer.id}>{layer.title}</option>
+            ))}
+          </select>
+
+          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
+            After Feature Layer (Time 2):
+          </label>
+          <select
+            value={afterFeatureLayer}
+            onChange={(e) => setAfterFeatureLayer(e.target.value)}
+            style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+            disabled={featureChangeActive}
+          >
+            <option value="">Select a polygon feature layer...</option>
+            {featureAvailableLayers.map(layer => (
+              <option key={layer.id} value={layer.id}>{layer.title}</option>
+            ))}
+          </select>
+
+          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
+            Feature Fetch Limit (0 = all features):
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '15px' }}>
+            <input
+              type="number"
+              min={0}
+              step={1000}
+              value={featureQueryLimit}
+              onChange={(e) => setFeatureQueryLimit(Math.max(0, parseInt(e.target.value) || 0))}
+              style={{ flex: 1, padding: '8px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+              disabled={featureChangeActive}
+            />
+            <span style={{ fontSize: '12px', color: '#666', whiteSpace: 'nowrap' }}>
+              {featureQueryLimit === 0 ? 'Fetch all (slower)' : `~${featureQueryLimit.toLocaleString()} rows`}
+            </span>
+          </div>
+
+          <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '14px' }}>
+            Compare Field (e.g. gridcode):
+          </label>
+          {featureLayerFields.length > 0 ? (
+            <select
+              value={compareField}
+              onChange={(e) => setCompareField(e.target.value)}
+              style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px' }}
+              disabled={featureChangeActive}
+            >
+              {featureLayerFields.map(f => <option key={f} value={f}>{f}</option>)}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={compareField}
+              onChange={(e) => setCompareField(e.target.value)}
+              placeholder="e.g. gridcode"
+              style={{ width: '100%', padding: '8px', marginBottom: '15px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '13px', boxSizing: 'border-box' }}
+              disabled={featureChangeActive}
+            />
+          )}
+
+          {!featureChangeActive ? (
+            <button
+              onClick={runFeatureLayerChangeDetection}
+              disabled={!beforeFeatureLayer || !afterFeatureLayer || featureChangeLoading}
+              style={{
+                width: '100%', padding: '10px',
+                backgroundColor: beforeFeatureLayer && afterFeatureLayer ? '#28a745' : '#ccc',
+                color: 'white', border: 'none', borderRadius: '4px',
+                cursor: beforeFeatureLayer && afterFeatureLayer ? 'pointer' : 'not-allowed',
+                fontSize: '14px', fontWeight: 'bold',
+              }}
+            >
+              {featureChangeLoading ? (featureChangeProgress || '⏳ Fetching features...') : '🔍 Detect Changes'}
+            </button>
+          ) : (
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                onClick={exportResultToGeoJSON}
+                style={{ flex: 1, padding: '10px', backgroundColor: '#0079c1', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '14px', fontWeight: 'bold' }}
+              >
+                ⬇️ Export GeoJSON
+              </button>
+              <button
+                onClick={removeFeatureChangeDetection}
+                style={{ flex: 1, padding: '10px', backgroundColor: '#d32f2f', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '14px', fontWeight: 'bold' }}
+              >
+                ❌ Remove Result
+              </button>
+            </div>
+          )}
+
+          {/* Results summary */}
+          {featureChangeStats && (
+            <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#f0fff4', borderRadius: '4px', borderLeft: '4px solid #28a745' }}>
+              <p style={{ margin: '0 0 8px 0', fontSize: '13px', fontWeight: 'bold', color: '#155724' }}>✅ Change Detection Results</p>
+              <p style={{ margin: '0 0 4px 0', fontSize: '12px' }}>
+                <strong>Changed polygons:</strong> {featureChangeStats.featureCount.toLocaleString()}
+              </p>
+              <p style={{ margin: '0 0 8px 0', fontSize: '12px' }}>
+                <strong>Total changed area:</strong> {featureChangeStats.totalArea.toLocaleString()} m²
+                &nbsp;({(featureChangeStats.totalArea / 10000).toFixed(2)} ha)
+              </p>
+              <p style={{ margin: '0 0 4px 0', fontSize: '12px', fontWeight: 'bold' }}>By change type:</p>
+              <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
+                {Object.entries(featureChangeStats.changesByType).map(([type, area]) => (
+                  <div key={type} style={{ fontSize: '11px', padding: '3px 0', borderBottom: '1px solid #d4edda' }}>
+                    <strong>{type}:</strong>&nbsp;{area.toLocaleString()} m² ({(area / 10000).toFixed(4)} ha)
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#f0f8ff', borderRadius: '4px', borderLeft: '4px solid #2196f3' }}>
+            <p style={{ margin: '0 0 6px 0', fontSize: '13px', fontWeight: 'bold' }}>📌 How it works:</p>
+            <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '12px', lineHeight: '1.6' }}>
+              <li>Select two polygon FeatureLayers (e.g. from Raster-to-Polygon result)</li>
+              <li>Choose the field that holds the class value (e.g. <code>gridcode</code>)</li>
+              <li>Unchanged areas (same class) are <strong>removed</strong></li>
+              <li>Changed areas are intersected and shown in a new result layer</li>
+              <li>Area (m² and ha) is calculated for each change type</li>
+              <li>Click a polygon on the map to see change details in the popup</li>
+            </ul>
+          </div>
+
+          {featureAvailableLayers.length === 0 && (
+            <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#fff3cd', borderRadius: '4px', borderLeft: '4px solid #ffc107' }}>
+              <p style={{ margin: 0, fontSize: '12px', color: '#856404' }}>
+                ⚠️ No FeatureLayers found on the map. Add your Raster-to-Polygon result layers first.
+              </p>
+            </div>
+          )}
+        </div>,
+        featureCDContainerRef.current
       )}
     </div>
   )
